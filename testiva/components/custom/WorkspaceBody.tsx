@@ -1,13 +1,35 @@
 "use client";
 import { UserDetailContext } from "@/context/UserDetailContext";
 import Image from "next/image";
-import React, { useContext } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import EmptyWorkspace from "./EmptyWorkspace";
+import axios from "axios";
+import { useRouter } from "next/navigation";
+import { cookies } from "next/headers";
 
 function WorkspaceBody() {
+  //const cookieStore = await cookies();
+  //const token = cookieStore.get("gh_token")?.value;
+  //We are fetching the token on the client side so error, have to fetch on the server side and pass it as a prop to this component
+
   const { userDetail } = useContext(UserDetailContext); //Using context to get user details
+  const router = useRouter();
+  const [token, setToken] = useState('');
+
+  useEffect(() => {
+    GetGithubUserToken();
+  }, []);
+
+  const GetGithubUserToken= async() =>{
+    const result = await axios.get("/api/github/token");
+    console.log(result.data.token); 
+    setToken(result.data.token);
+  }
+  const onAddRepo = async () => {
+    router.push("/api/github");
+  };
   return (
     <div>
       <div className="flex justify-between items-center">
@@ -31,7 +53,7 @@ function WorkspaceBody() {
           </h2>
         </div>
         <div>
-          <Button>Install</Button>
+          {!token?<Button onClick={onAddRepo}>Setup </Button>:<Button>+ Add Repository</Button>}
         </div>
       </Card>
       <Card className="mt-10">
