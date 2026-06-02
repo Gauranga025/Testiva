@@ -8,6 +8,7 @@ import EmptyWorkspace from "./EmptyWorkspace";
 import axios from "axios";
 import { useRouter } from "next/navigation";
 import { cookies } from "next/headers";
+import RepoDialog from "./RepoDialog";
 
 function WorkspaceBody() {
   //const cookieStore = await cookies();
@@ -53,7 +54,7 @@ function WorkspaceBody() {
           </h2>
         </div>
         <div>
-          {!token?<Button onClick={onAddRepo}>Setup </Button>:<Button>+ Add Repository</Button>}
+          {!token?<Button onClick={onAddRepo}>Setup </Button>:<RepoDialog setRefreshPage={(refresh: boolean) => console.log(refresh)}/>}
         </div>
       </Card>
       <Card className="mt-10">
