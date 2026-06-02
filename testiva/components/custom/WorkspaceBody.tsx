@@ -8,7 +8,24 @@ import EmptyWorkspace from "./EmptyWorkspace";
 import axios from "axios";
 import { useRouter } from "next/navigation";
 import { cookies } from "next/headers";
-import RepoDialog from "./RepoDialog";
+import RepoDialog, { Repo } from "./RepoDialog";
+import UserRepoList from "./UserRepoList";
+
+export type UserRepo = {
+  id: number;
+  repoId: number;
+  name: string;
+  fullName: string;
+  private: boolean;
+  htmlUrl: string;
+  description: string;
+  updatedAt: string;
+  userId: number;
+  owner: string;
+  language: string;
+  defaultBranch: string;
+};
+
 
 function WorkspaceBody() {
   //const cookieStore = await cookies();
@@ -18,19 +35,31 @@ function WorkspaceBody() {
   const { userDetail } = useContext(UserDetailContext); //Using context to get user details
   const router = useRouter();
   const [token, setToken] = useState('');
+  const [userRepoList, setUserRepoList] = useState<UserRepo[]>([]);
+
 
   useEffect(() => {
     GetGithubUserToken();
+
   }, []);
 
-  const GetGithubUserToken= async() =>{
+  useEffect(() => {
+    userDetail && GetUserAddedRepoList();
+  }, [userDetail]);
+  const GetGithubUserToken = async () => {
     const result = await axios.get("/api/github/token");
-    console.log(result.data.token); 
+    console.log(result.data.token);
     setToken(result.data.token);
   }
   const onAddRepo = async () => {
     router.push("/api/github");
+  }
+  const GetUserAddedRepoList = async () => {
+    const result = await axios.get('/api/user-repo?userId=' + userDetail?.id);
+    setUserRepoList(result.data);
+    console.log(result.data);
   };
+
   return (
     <div>
       <div className="flex justify-between items-center">
@@ -54,14 +83,17 @@ function WorkspaceBody() {
           </h2>
         </div>
         <div>
-          {!token?<Button onClick={onAddRepo}>Setup </Button>:<RepoDialog setRefreshPage={(refresh: boolean) => console.log(refresh)}/>}
+          {!token ? <Button onClick={onAddRepo}>Setup </Button> : <RepoDialog setRefreshPage={(refresh: boolean) => GetUserAddedRepoList()} />}
         </div>
       </Card>
-      <Card className="mt-10">
+
+
+      {!userRepoList ? <Card className="mt-10">
         <CardContent>
           <EmptyWorkspace />
         </CardContent>
       </Card>
+        : <UserRepoList repoList={userRepoList} />}
     </div>
   );
 }

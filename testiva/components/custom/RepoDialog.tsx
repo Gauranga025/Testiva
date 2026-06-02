@@ -14,7 +14,7 @@ import { DialogClose } from "@radix-ui/react-dialog";
 import axios from "axios";
 import { Input } from "../ui/input";
 import { UserDetailContext } from "@/context/UserDetailContext";
-type Repo = {
+export type Repo = {
   id: number;
   name: string;
   full_name: string;
