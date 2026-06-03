@@ -7,14 +7,16 @@ import {
     AccordionTrigger,
 } from "@/components/ui/accordion"
 import Image from 'next/image';
-import { CheckCircle2, ListChecks, Loader2, Loader2Icon, Sparkles, TrendingUp, XCircle } from 'lucide-react';
+import { CheckCircle2, Globe2Icon, ListChecks, Loader2, Loader2Icon, Settings2, Sparkles, TrendingUp, XCircle } from 'lucide-react';
 import { Button } from '../ui/button';
 import axios from 'axios';
 import { UserDetailContext } from '@/context/UserDetailContext';
 import TestCaseList from './TestCaseList';
+import RepoSettings from './RepoSettings';
 
 type props = {
     repoList: UserRepo[];
+    setReload: () => void;
 }
 
 export type TestCase = {
@@ -24,10 +26,10 @@ export type TestCase = {
     type: string;
     repoId: number;
     targetFiles: string[];
-    expectedResult : string;
+    expectedResult: string;
     repoName: string;
     repoOwner: string;
-    targetRoute : string;
+    targetRoute: string;
 }
 
 type StatusData = {
@@ -36,14 +38,14 @@ type StatusData = {
     failedTests: number;
     passRate: number;
 }
-function UserRepoList({ repoList }: props) {
+function UserRepoList({ repoList, setReload }: props) {
     const [statusData, setStatusData] = useState<StatusData>({
         totalTests: 0,
         passedTests: 0,
         failedTests: 0,
         passRate: 0,
     });
-    
+
     const { userDetail } = useContext(UserDetailContext);
     const [loading, setLoading] = useState(false);
     const [testCaseLoading, setTestCaseLoading] = useState(false);
@@ -103,6 +105,33 @@ function UserRepoList({ repoList }: props) {
                         <AccordionContent>
                             <div className='pt-4 space-y-5'>
 
+                                {/* Target Domain Card start */}
+                                <div className="flex items-center justify-between rounded-2xl border border-indigo-100 bg-linear-to-r from-slate-50 via-white to-indigo-50 p-5 shadow-sm hover:shadow-md transition-all">
+
+                                    <div className="flex items-center gap-4">
+
+                                        <div className="h-14 w-14 rounded-2xl bg-linear-to-br from-blue-600 to-violet-600 flex items-center justify-center shadow-lg">
+                                            <Globe2Icon className="h-7 w-7 text-white" />
+                                        </div>
+
+                                        <div>
+                                            <p className="text-xs font-bold tracking-widest text-gray-500 uppercase">
+                                                Target Domain
+                                            </p>
+
+                                            <h2 className="text-2xl font-bold text-indigo-600 break-all">
+                                                {repo.targetDomain}
+                                            </h2>
+                                        </div>
+
+                                    </div>
+                                    <RepoSettings repo={repo} setReload = {setReload} />
+                                    
+
+                                </div>
+
+                                {/* Target Domain Card end */}
+
                                 <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4'>
 
                                     <StatusCard
@@ -134,7 +163,7 @@ function UserRepoList({ repoList }: props) {
                                     />
                                 </div>
 
-                                { !testCaseLoading && testCases.length > 0 && <TestCaseList testCases = {testCases} onReload={(repoId: number) =>GetTestCases(repoId)}/> }
+                                {!testCaseLoading && testCases.length > 0 && <TestCaseList testCases={testCases} onReload={(repoId: number) => GetTestCases(repoId)} />}
 
                                 {testCaseLoading ?
                                     <h2 className='flex items-center gap-2'>

@@ -8,6 +8,7 @@ import {
     SettingsIcon
 } from 'lucide-react';
 import { Button } from '../ui/button';
+import TestCaseSettingDialog from './TestCaseSettingDialog';
 
 type Props = {
     testCases: TestCase[];
@@ -115,13 +116,8 @@ function TestCaseList({ testCases, onReload }: Props) {
                                 Pending
                             </Badge>
 
-                            <Button
-                                variant="outline"
-                                size="icon"
-                                className='rounded-xl border-gray-200 hover:bg-gray-100 hover:border-gray-300 shadow-sm transition-all'
-                            >
-                                <SettingsIcon className='h-4 w-4 text-gray-600 cursor-pointer' />
-                            </Button>
+                            <TestCaseSettingDialog testCase={testCase} setReload={onReload}/>
+
                         </div>
                     </div>
                 ))}
