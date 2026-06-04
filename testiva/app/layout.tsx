@@ -7,6 +7,11 @@ import Provider from './provider';
 export const metadata: Metadata = {
   title: "Testiva - AI Test Automation",
   description: "AI Test Automation",
+  icons: {
+    icon: "/TestivaLogo.png",
+    shortcut: "/TestivaLogo.png",
+    apple: "/TestivaLogo.png",
+  },
 };
 
 export default function RootLayout({
