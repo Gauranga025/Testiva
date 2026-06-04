@@ -1,13 +1,41 @@
+import DashboardPreview from '@/components/landing/DashboardPreview';
+import Features from '@/components/landing/Features';
+import Header from '@/components/landing/Header';
+import HowItWorks from '@/components/landing/HowItWorks';
+import Hero from '@/components/landing/Hero';
+import CTA from '@/components/landing/CTA';
+import Footer from '@/components/landing/Footer';
+import Stats from '@/components/landing/Stats';
+
+import Testimonials from '@/components/landing/Testimonials';
+
+
 import { UserButton } from '@clerk/nextjs';
 import React from 'react';
 
 export default function Home() {
   return (
-    <div>
-      <UserButton/>
-      <h1>Welcome to Testiva!</h1>
-      <p>This is the home page of your Next.js application.</p>
-    </div>
+    <main className="bg-white min-h-screen">
+
+      <Header />
+
+      <Hero />
+
+      <Features />
+
+      <HowItWorks />
+
+      <DashboardPreview />
+
+      <Testimonials />
+
+      <Stats />
+
+      <CTA />
+
+      <Footer />
+
+    </main>
   );
 }
 

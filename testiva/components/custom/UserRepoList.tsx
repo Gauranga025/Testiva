@@ -30,9 +30,15 @@ export type TestCase = {
     repoName: string;
     repoOwner: string;
     targetRoute: string;
+    status?: "failed" | "passed" | "running" | "gemini_error";
+    browserbaseScript?: string;
+    logs?: string[];
+    sessionId?: string;
+    sessionUrl?: string;
 }
 
 type StatusData = {
+
     totalTests: number;
     passedTests: number;
     failedTests: number;
@@ -71,11 +77,17 @@ function UserRepoList({ repoList, setReload }: props) {
         setTestCases([]);
         const result = await axios.get(`/api/test-cases?repoId=${repoId}`);
         console.log(result.data);
+        const userTestCases = result.data as TestCase[];
+        const passedTests = userTestCases?.filter(testCase => testCase.status == 'passed').length || 0;
+        const failedTests = userTestCases?.filter(testCase => testCase.status == 'failed').length || 0;
+        const passRate = userTestCases?.length?Math.round((passedTests/userTestCases.length) * 100) : 0;
+
+
         setStatusData({
             totalTests: result.data.length,
-            passedTests: 0,
-            failedTests: 0,
-            passRate: 0,
+            passedTests: passedTests,
+            failedTests: failedTests,
+            passRate: passRate,
         });
         setTestCases(result.data);
         setTestCaseLoading(false);
@@ -163,7 +175,7 @@ function UserRepoList({ repoList, setReload }: props) {
                                     />
                                 </div>
 
-                                {!testCaseLoading && testCases.length > 0 && <TestCaseList testCases={testCases} onReload={(repoId: number) => GetTestCases(repoId)} />}
+                                {!testCaseLoading && testCases.length > 0 && <TestCaseList testCases={testCases} onReload={(repoId: number) => GetTestCases(repoId)} targetDomain={repo.targetDomain ?? ''}/>}
 
                                 {testCaseLoading ?
                                     <h2 className='flex items-center gap-2'>
