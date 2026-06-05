@@ -1,4 +1,3 @@
-export const runtime = 'nodejs'
 
 import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
 
@@ -17,4 +16,5 @@ export const config = {
     // Always run for Clerk-specific frontend API routes
     '/__clerk/(.*)',
   ],
+  runtime: "nodejs",
 }
