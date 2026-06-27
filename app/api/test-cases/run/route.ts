@@ -1,0 +1,889 @@
+import { NextRequest, NextResponse } from "next/server";
+import { generateText } from "@/lib/ai/provider";
+import { db } from "@/db";
+import { TestCasesTable, repositories } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { cookies } from "next/headers";
+import { Browserbase } from "@browserbasehq/sdk";
+import { formatLogLine } from "@/lib/execution/logger";
+import { runBrowserbaseScript } from "@/lib/execution/browserbase-runner";
+import {
+    buildDiscoveryCacheEntry,
+    buildDiscoveryCacheKey,
+    getCachedDiscovery,
+    summarizeDomForPrompt,
+} from "@/lib/execution/discovery-cache";
+import {
+    buildFullUrl,
+    discoverEnvironment,
+    normalizeBaseUrl,
+    resolveEnvironmentType,
+    rewriteScriptForEnvironment,
+} from "@/lib/execution/environment";
+import { runPreflightChecks } from "@/lib/execution/health-checks";
+import {
+    activatePipelineStage,
+    completePipeline,
+    createInitialPipeline,
+    markPipelineStage,
+} from "@/lib/execution/pipeline-stages";
+import { runUiDiscovery } from "@/lib/execution/ui-discovery";
+import type { DomSummary, HealthReport, PipelineStage, TunnelInfo } from "@/lib/execution/types";
+import { ExecutionStateMachine } from "@/lib/execution/state-machine";
+import { CleanupManager } from "@/lib/execution/cleanup-manager";
+import { TimeoutManager } from "@/lib/execution/timeout-manager";
+import { BrowserbaseLifecycleManager } from "@/lib/execution/browserbase-lifecycle";
+import { CloudflareLifecycleManager } from "@/lib/execution/cloudflare-lifecycle";
+import { ExecutionDiagnostics } from "@/lib/execution/diagnostics";
+import { UrlValidator } from "@/lib/execution/url-validator";
+import { LocalServerVerifier } from "@/lib/execution/local-server-verifier";
+import { isExecutionError } from "@/lib/execution/errors";
+import { RepositoryIntelligenceService } from "@/lib/ai/repository-intelligence";
+import { AIContextEngine, type AIContext } from "@/lib/ai/ai-context";
+import { PromptBuilders } from "@/lib/ai/prompt-builders";
+import { FailureAnalysisService, type FailureContext, type FailedStep } from "@/lib/execution/failure-analysis";
+import { RepositoryMemoryService } from "@/lib/execution/repository-memory";
+import { SelfHealingService } from "@/lib/execution/self-healing";
+
+export const maxDuration = 300;
+
+const bb = new Browserbase({
+    apiKey: process.env.BROWSERBASE_API_KEY!,
+});
+
+async function readGithubFile({
+    owner,
+    repo,
+    path,
+    branch,
+    githubToken,
+}: {
+    owner: string;
+    repo: string;
+    path: string;
+    branch: string;
+    githubToken: string;
+}) {
+    const res = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
+        {
+            headers: {
+                Authorization: `Bearer ${githubToken}`,
+                Accept: "application/vnd.github+json",
+            },
+        }
+    );
+
+    if (!res.ok) {
+        return null;
+    }
+
+    const data = await res.json();
+
+    if (!data.content) {
+        return null;
+    }
+
+    const decodedContent = Buffer.from(data.content, "base64").toString("utf-8");
+
+    return {
+        path,
+        content: decodedContent.slice(0, 5000),
+    };
+}
+
+async function resolveGithubToken(bodyToken?: string): Promise<string | null> {
+    const cookieStore = await cookies();
+    return cookieStore.get("gh_token")?.value ?? bodyToken ?? null;
+}
+
+async function markTestCaseFailed(
+    testCaseId: number,
+    logs: string[],
+    scriptText: string | null,
+    sessionId?: string | null,
+    sessionUrl?: string | null
+) {
+    await db
+        .update(TestCasesTable)
+        .set({
+            status: "failed",
+            browserbaseScript: scriptText ?? undefined,
+            logs,
+            sessionId: sessionId ?? null,
+            sessionUrl: sessionUrl ?? null,
+        })
+        .where(eq(TestCasesTable.id, testCaseId));
+}
+
+async function fetchRepoContext(
+    testCase: typeof TestCasesTable.$inferSelect,
+    githubToken: string,
+    logs: string[]
+): Promise<string> {
+    logs.push(formatLogLine("[SYSTEM]", "Analyzing repository files for context..."));
+
+    const targetFiles = testCase.targetFiles || [];
+    if (targetFiles.length === 0) {
+        return "";
+    }
+
+    const fileContents = await Promise.all(
+        targetFiles.map((path) =>
+            readGithubFile({
+                owner: testCase.repoOwner,
+                repo: testCase.repoName,
+                branch: testCase.branch || "main",
+                path,
+                githubToken,
+            })
+        )
+    );
+
+    return fileContents
+        .filter(Boolean)
+        .map(
+            (file) => `
+File Path: ${file!.path}
+File Content:
+${file!.content}
+`
+        )
+        .join("\n\n----------------------\n\n");
+}
+
+export async function POST(req: NextRequest) {
+    let testCaseId: number | null = null;
+    let scriptText: string | null = null;
+    let pipelineStages: PipelineStage[] = [];
+    let tunnelInfo: TunnelInfo | null = null;
+    let healthReport: HealthReport | null = null;
+
+    // Initialize production-grade services
+    const pipelineLogs: string[] = [];
+    const stateMachine = new ExecutionStateMachine();
+    const cleanupManager = new CleanupManager(pipelineLogs);
+    const timeoutManager = new TimeoutManager();
+    const diagnostics = new ExecutionDiagnostics();
+    const urlValidator = new UrlValidator();
+    const localServerVerifier = new LocalServerVerifier(pipelineLogs, timeoutManager);
+    const browserbaseLifecycle = new BrowserbaseLifecycleManager(
+        bb,
+        process.env.BROWSERBASE_PROJECT_ID!,
+        pipelineLogs,
+        timeoutManager
+    );
+    const cloudflareLifecycle = new CloudflareLifecycleManager(pipelineLogs, timeoutManager);
+    const repositoryIntelligenceService = new RepositoryIntelligenceService();
+    const aiContextEngine = new AIContextEngine();
+    const failureAnalysisService = new FailureAnalysisService();
+    const repositoryMemoryService = new RepositoryMemoryService();
+    const selfHealingService = new SelfHealingService();
+
+    try {
+        const body = await req.json();
+        testCaseId = Number(body.testCaseId);
+        const baseUrl: string = body.baseUrl;
+        const mode: "cache" | "generate" = body.mode === "cache" ? "cache" : "generate";
+        const customPrompt: string = body.customPrompt ?? "";
+        const bodyGithubToken: string | undefined = body.githubToken;
+        const forceRun: boolean = body.force === true;
+        const refreshDiscovery: boolean = body.refreshDiscovery === true;
+        const useLocalhost: boolean | undefined =
+            body.useLocalhost === undefined ? undefined : body.useLocalhost === true;
+
+        if (!testCaseId || !baseUrl) {
+            return NextResponse.json(
+                { error: "testCaseId and baseUrl are required" },
+                { status: 400 }
+            );
+        }
+
+        // Transition state machine
+        stateMachine.transition("initializing", "request_received", "route.ts:203");
+
+        const [testCase] = await db
+            .select()
+            .from(TestCasesTable)
+            .where(eq(TestCasesTable.id, testCaseId));
+
+        if (!testCase) {
+            return NextResponse.json({ error: "Test case not found" }, { status: 404 });
+        }
+
+        if (testCase.status === "running" && !forceRun) {
+            return NextResponse.json(
+                {
+                    success: false,
+                    status: "failed",
+                    error: "Test case is already running. Wait for the current execution to finish.",
+                },
+                { status: 409 }
+            );
+        }
+
+        let repoRecord = null;
+        if (testCase.repoId) {
+            const [r] = await db
+                .select()
+                .from(repositories)
+                .where(eq(repositories.repoId, parseInt(testCase.repoId, 10)));
+            repoRecord = r ?? null;
+        }
+
+        if (!repoRecord) {
+            const [r] = await db
+                .select()
+                .from(repositories)
+                .where(
+                    eq(repositories.fullName, `${testCase.repoOwner}/${testCase.repoName}`)
+                );
+            repoRecord = r ?? null;
+        }
+
+        scriptText = testCase.browserbaseScript;
+        const forceRegenerate = mode === "generate" || !scriptText;
+
+        // Validate URL using new validator
+        const normalizedBaseUrl = urlValidator.validateOrThrow(baseUrl);
+        const environmentType = resolveEnvironmentType(normalizedBaseUrl, useLocalhost);
+        const cacheKey = buildDiscoveryCacheKey({
+            repoId: testCase.repoId ?? repoRecord?.repoId ?? null,
+            baseUrl: normalizedBaseUrl,
+            branch: testCase.branch,
+        });
+
+        const needsTunnel = environmentType === "localhost";
+        const cachedDiscoveryPreview = refreshDiscovery
+            ? null
+            : getCachedDiscovery(repoRecord?.uiDiscoveryCache ?? null, cacheKey);
+        const skipUiDiscovery =
+            !forceRegenerate || (!!cachedDiscoveryPreview && !refreshDiscovery);
+
+        pipelineStages = createInitialPipeline({
+            skipTunnel: !needsTunnel,
+            skipUiDiscovery,
+            skipGeneration: !forceRegenerate,
+        });
+
+        if (!process.env.BROWSERBASE_PROJECT_ID) {
+            throw new Error("BROWSERBASE_PROJECT_ID is not configured");
+        }
+
+        const githubToken = await resolveGithubToken(bodyGithubToken);
+
+        pipelineStages = activatePipelineStage(pipelineStages, "health_checks");
+        stateMachine.transition("health_checks", "preflight_start", "route.ts:276");
+
+        healthReport = await runPreflightChecks({
+            baseUrl: normalizedBaseUrl,
+            useLocalhost,
+            repositoryExists: !!repoRecord,
+            githubToken,
+            needsGithubToken: forceRegenerate,
+            needsAiProviders: forceRegenerate,
+            browserbaseProjectId: process.env.BROWSERBASE_PROJECT_ID,
+            logs: pipelineLogs,
+        });
+
+        if (!healthReport.ok) {
+            const failedChecks = healthReport.checks
+                .filter((check) => check.status === "failed")
+                .map((check) => `${check.label}: ${check.message}`)
+                .join("; ");
+
+            stateMachine.transition("failed", "health_checks_failed", "route.ts:295");
+            pipelineStages = markPipelineStage(pipelineStages, "health_checks", "failed");
+            pipelineStages = completePipeline(pipelineStages, false);
+
+            await markTestCaseFailed(
+                testCase.id,
+                pipelineLogs,
+                scriptText
+            );
+
+            return NextResponse.json(
+                {
+                    success: false,
+                    status: "failed",
+                    error: `Preflight health checks failed: ${failedChecks}`,
+                    logs: pipelineLogs,
+                    stages: pipelineStages,
+                    healthReport,
+                },
+                { status: 422 }
+            );
+        }
+
+        stateMachine.transition("environment_discovery", "health_checks_passed", "route.ts:318");
+        pipelineStages = markPipelineStage(pipelineStages, "health_checks", "completed");
+        pipelineStages = activatePipelineStage(pipelineStages, "environment_discovery");
+
+        const { result: envResult, tunnelHandle: createdTunnel } = await discoverEnvironment({
+            baseUrl: normalizedBaseUrl,
+            useLocalhost,
+            logs: pipelineLogs,
+        });
+
+        // Register tunnel with cleanup manager if created
+        if (createdTunnel) {
+            cleanupManager.registerTunnel("tunnel", createdTunnel.close);
+        }
+        tunnelInfo = envResult.tunnel;
+        const effectiveBaseUrl = envResult.effectiveUrl;
+
+        stateMachine.transition(needsTunnel ? "tunnel_creation" : "repository_analysis", "environment_discovered", "route.ts:335");
+        pipelineStages = markPipelineStage(pipelineStages, "environment_discovery", "completed");
+
+        if (needsTunnel) {
+            pipelineStages = activatePipelineStage(pipelineStages, "tunnel_creation");
+            pipelineStages = markPipelineStage(
+                pipelineStages,
+                "tunnel_creation",
+                envResult.tunnel?.status === "connected" ? "completed" : "failed"
+            );
+            if (envResult.tunnel?.status !== "connected") {
+                stateMachine.transition("failed", "tunnel_creation_failed", "route.ts:346");
+            } else {
+                stateMachine.transition("repository_analysis", "tunnel_created", "route.ts:348");
+                pipelineStages = activatePipelineStage(pipelineStages, "repository_analysis");
+            }
+        } else {
+            pipelineStages = activatePipelineStage(pipelineStages, "repository_analysis");
+        }
+
+        let repoContext = "";
+        let repositoryIntelligence: any = null;
+        let aiContext: AIContext | null = null;
+
+        if (forceRegenerate) {
+            repoContext = await fetchRepoContext(testCase, githubToken!, pipelineLogs);
+            
+            // Generate Repository Intelligence
+            const repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
+                packageJson: { dependencies: {}, devDependencies: {} },
+                files: testCase.targetFiles || [],
+                envContent: "",
+            });
+
+            // Check if we have cached Repository Intelligence that's still valid
+            repositoryIntelligence = repoRecord?.repositoryIntelligenceCache;
+            if (repositoryIntelligence && repositoryIntelligence.repositoryHash !== repositoryHash) {
+                pipelineLogs.push(
+                    formatLogLine("[SYSTEM]", "Repository changed - invalidating cached Repository Intelligence")
+                );
+                repositoryIntelligence = null;
+            }
+
+            if (!repositoryIntelligence) {
+                pipelineLogs.push(
+                    formatLogLine("[SYSTEM]", "Generating new Repository Intelligence")
+                );
+                // In production, this would call repositoryIntelligenceService.analyzeRepository()
+                // with actual repository data from GitHub
+                repositoryIntelligence = {
+                    framework: { name: "Next.js", version: "15", type: "fullstack" },
+                    authentication: { provider: null, type: "oauth", libraries: [] },
+                    database: { type: null, host: null, name: null },
+                    orm: { name: "Drizzle", version: null },
+                    routing: { type: "app-router", basePath: "app" },
+                    middleware: { present: true, type: "nextjs" },
+                    api: { type: "route-handlers", basePath: "app/api" },
+                    forms: { library: null, validation: null },
+                    validation: { library: "zod", schemaLocation: null },
+                    businessModules: [],
+                    libraries: [],
+                    packageManager: "npm",
+                    buildTool: { name: "Next.js", version: "15" },
+                    environmentVariables: [],
+                    architecture: { pattern: "monolith", layers: [] },
+                    analyzedAt: new Date().toISOString(),
+                    repositoryHash,
+                };
+
+                // Cache the Repository Intelligence
+                if (repoRecord) {
+                    try {
+                        await db
+                            .update(repositories)
+                            .set({ repositoryIntelligenceCache: repositoryIntelligence })
+                            .where(eq(repositories.id, repoRecord.id));
+                        pipelineLogs.push(
+                            formatLogLine("[SYSTEM]", "Repository Intelligence cached")
+                        );
+                    } catch (cacheErr) {
+                        pipelineLogs.push(
+                            formatLogLine("[ERROR]", "Failed to cache Repository Intelligence (continuing anyway)")
+                        );
+                    }
+                }
+            } else {
+                pipelineLogs.push(
+                    formatLogLine("[SYSTEM]", "Using cached Repository Intelligence")
+                );
+            }
+        } else {
+            pipelineLogs.push(formatLogLine("[SYSTEM]", "Using cached Playwright script — skipping repository re-analysis"));
+            // Use cached Repository Intelligence if available
+            repositoryIntelligence = repoRecord?.repositoryIntelligenceCache;
+        }
+
+        pipelineStages = markPipelineStage(pipelineStages, "repository_analysis", "completed");
+
+        let domSummary: DomSummary | null = null;
+        const cachedDiscovery = cachedDiscoveryPreview;
+
+        if (!forceRegenerate) {
+            pipelineLogs.push(formatLogLine("[DISCOVERY]", "Skipping UI discovery for cached script run"));
+            stateMachine.transition("playwright_generation", "skipped_discovery", "route.ts:438");
+            pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "skipped");
+            pipelineStages = markPipelineStage(pipelineStages, "dom_summary", "skipped");
+        } else if (cachedDiscovery) {
+            domSummary = cachedDiscovery.domSummary;
+            pipelineLogs.push(formatLogLine("[DISCOVERY]", "Using cached DOM summary"));
+            stateMachine.transition("playwright_generation", "cached_discovery", "route.ts:444");
+            pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "skipped");
+            pipelineStages = markPipelineStage(pipelineStages, "dom_summary", "completed");
+        } else {
+            stateMachine.transition("ui_discovery", "repository_analyzed", "route.ts:448");
+            pipelineStages = activatePipelineStage(pipelineStages, "ui_discovery");
+
+            const discoveryUrl = buildFullUrl(
+                effectiveBaseUrl,
+                testCase.targetRoute || "/"
+            );
+
+            domSummary = await runUiDiscovery({
+                bb,
+                projectId: process.env.BROWSERBASE_PROJECT_ID,
+                targetUrl: discoveryUrl,
+                logs: pipelineLogs,
+            });
+
+            stateMachine.transition("dom_summary", "ui_discovered", "route.ts:463");
+            pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "completed");
+            pipelineStages = activatePipelineStage(pipelineStages, "dom_summary");
+            pipelineStages = markPipelineStage(pipelineStages, "dom_summary", "completed");
+
+            if (repoRecord) {
+                const cacheEntry = buildDiscoveryCacheEntry({
+                    cacheKey,
+                    targetUrl: normalizedBaseUrl,
+                    effectiveUrl: effectiveBaseUrl,
+                    environmentType: envResult.environmentType,
+                    domSummary,
+                });
+
+                await db
+                    .update(repositories)
+                    .set({ uiDiscoveryCache: cacheEntry })
+                    .where(eq(repositories.id, repoRecord.id));
+            }
+        }
+
+        const uiContext = domSummary ? summarizeDomForPrompt(domSummary) : "";
+
+        if (forceRegenerate) {
+            stateMachine.transition("playwright_generation", "dom_summarized", "route.ts:487");
+            pipelineStages = activatePipelineStage(pipelineStages, "playwright_generation");
+            pipelineLogs.push(
+                formatLogLine("[AI]", "Generating Playwright script using AI Context Engine...")
+            );
+
+            // Build AI Context using Repository Intelligence from repository_analysis stage
+            const aiContext: AIContext = aiContextEngine.buildContext({
+                environment: {
+                    type: envResult.environmentType,
+                    baseUrl: normalizedBaseUrl,
+                    effectiveUrl: effectiveBaseUrl,
+                    isLocalhost: envResult.environmentType === "localhost",
+                },
+                repository: repositoryIntelligence || {
+                    framework: { name: "Next.js", version: "15", type: "fullstack" },
+                    authentication: { provider: null, type: "oauth", libraries: [] },
+                    database: { type: null, host: null, name: null },
+                    orm: { name: "Drizzle", version: null },
+                    routing: { type: "app-router", basePath: "app" },
+                    middleware: { present: true, type: "nextjs" },
+                    api: { type: "route-handlers", basePath: "app/api" },
+                    forms: { library: null, validation: null },
+                    validation: { library: "zod", schemaLocation: null },
+                    businessModules: [],
+                    libraries: [],
+                    packageManager: "npm",
+                    buildTool: { name: "Next.js", version: "15" },
+                    environmentVariables: [],
+                    architecture: { pattern: "monolith", layers: [] },
+                    analyzedAt: new Date().toISOString(),
+                    repositoryHash: "",
+                },
+                uiDiscovery: domSummary || {
+                    currentUrl: effectiveBaseUrl,
+                    finalUrl: effectiveBaseUrl,
+                    title: "",
+                    metaDescription: null,
+                    navigation: [],
+                    buttons: [],
+                    forms: [],
+                    headings: [],
+                    dialogs: [],
+                    tabs: [],
+                    dropdowns: [],
+                    tables: [],
+                    cards: [],
+                    routes: [],
+                    loginDiscovery: null,
+                    accessibility: [],
+                    loadingStates: [],
+                    errorStates: [],
+                    emptyStates: [],
+                    visibleComponents: [],
+                },
+                executionGoal: {
+                    type: "test_execution",
+                    targetRoute: testCase.targetRoute || "/",
+                    expectedBehavior: testCase.expectedResult || "",
+                    priority: "high",
+                },
+                testCase: {
+                    id: testCase.id,
+                    title: testCase.title,
+                    description: testCase.description,
+                    targetRoute: testCase.targetRoute || "/",
+                    expectedResult: testCase.expectedResult || "",
+                    targetFiles: testCase.targetFiles || [],
+                    repoOwner: testCase.repoOwner,
+                    repoName: testCase.repoName,
+                    branch: testCase.branch || "main",
+                },
+                globalInstructions: repoRecord?.globalInstruction || undefined,
+                runtimeInstructions: customPrompt || undefined,
+            });
+
+            // Build prompt using PromptBuilders
+            const prompt = PromptBuilders.buildPlaywrightPrompt(aiContext);
+
+            try {
+                const { text, provider } = await generateText(prompt);
+
+                let generatedCode = text
+                    .replace(/^```(?:javascript|js)?\s*/i, "")
+                    .replace(/```\s*$/i, "")
+                    .trim();
+
+                if (!generatedCode) {
+                    throw new Error("AI returned an empty script after cleanup");
+                }
+
+                scriptText = generatedCode;
+                pipelineLogs.push(
+                    formatLogLine(
+                        "[AI]",
+                        `Script generated via ${provider} (${generatedCode.length} chars)`
+                    )
+                );
+                stateMachine.transition("execution", "script_generated", "route.ts:585");
+                pipelineStages = markPipelineStage(pipelineStages, "playwright_generation", "completed");
+            } catch (aiError: unknown) {
+                const message =
+                    aiError instanceof Error ? aiError.message : String(aiError);
+
+                stateMachine.transition("failed", "script_generation_failed", "route.ts:591");
+                pipelineStages = markPipelineStage(pipelineStages, "playwright_generation", "failed");
+
+                await db
+                    .update(TestCasesTable)
+                    .set({
+                        status: "gemini_error",
+                        logs: [
+                            formatLogLine("[AI]", "Script generation failed (all providers exhausted)"),
+                            formatLogLine("[ERROR]", message),
+                            ...pipelineLogs,
+                        ],
+                    })
+                    .where(eq(TestCasesTable.id, testCase.id));
+
+                return NextResponse.json(
+                    {
+                        success: false,
+                        status: "gemini_error",
+                        error: message,
+                        logs: [
+                            formatLogLine("[AI]", "Script generation failed"),
+                            formatLogLine("[ERROR]", message),
+                            ...pipelineLogs,
+                        ],
+                        stages: pipelineStages,
+                        tunnel: tunnelInfo,
+                        healthReport,
+                    },
+                    { status: 500 }
+                );
+            }
+
+            await db
+                .update(TestCasesTable)
+                .set({
+                    browserbaseScript: scriptText,
+                    status: "running",
+                    logs: [...pipelineLogs],
+                })
+                .where(eq(TestCasesTable.id, testCase.id));
+        } else {
+            pipelineLogs.push(
+                formatLogLine("[SYSTEM]", "Using cached Playwright script from database")
+            );
+            stateMachine.transition("execution", "using_cached_script", "route.ts:636");
+            await db
+                .update(TestCasesTable)
+                .set({
+                    status: "running",
+                    logs: [...pipelineLogs],
+                })
+                .where(eq(TestCasesTable.id, testCase.id));
+        }
+
+        if (!scriptText) {
+            stateMachine.transition("failed", "no_script_available", "route.ts:647");
+            throw new Error("No Playwright script available for execution");
+        }
+
+        const executableScript = rewriteScriptForEnvironment(
+            scriptText,
+            normalizedBaseUrl,
+            effectiveBaseUrl
+        );
+
+        pipelineStages = activatePipelineStage(pipelineStages, "execution");
+
+        const outcome = await runBrowserbaseScript({
+            bb,
+            projectId: process.env.BROWSERBASE_PROJECT_ID,
+            scriptText: executableScript,
+        });
+
+        const logs = [...pipelineLogs, ...outcome.logs];
+
+        pipelineStages = markPipelineStage(pipelineStages, "execution", outcome.success ? "completed" : "failed");
+        
+        // Get repository hash for memory
+        const repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
+            packageJson: { dependencies: {}, devDependencies: {} },
+            files: testCase.targetFiles || [],
+            envContent: "",
+        });
+        
+        // Initialize repository memory
+        repositoryMemoryService.getRepositoryMemory(repositoryHash, repoRecord?.htmlUrl || "");
+        
+        if (outcome.success) {
+            stateMachine.transition("assertions", "execution_completed", "route.ts:680");
+            pipelineStages = activatePipelineStage(pipelineStages, "assertions");
+            pipelineStages = markPipelineStage(pipelineStages, "assertions", "completed");
+            stateMachine.transition("cleanup", "assertions_passed", "route.ts:683");
+            
+            // Record successful execution in memory
+            repositoryMemoryService.recordExecutionHistory(repositoryHash, {
+                executionId: testCase.id.toString(),
+                route: testCase.targetRoute || "/",
+                success: true,
+                runtime: 0,
+                memoryHits: 0,
+                memoryMisses: 0,
+            });
+        } else {
+            stateMachine.transition("failed", "execution_failed", "route.ts:695");
+            
+            // Failure Analysis and Self-Healing
+            logs.push(formatLogLine("[FAILURE]", "Execution failed, starting failure analysis"));
+            
+            // Create failed step from outcome
+            const failedStep: FailedStep = {
+                stepNumber: 1,
+                action: "unknown",
+                selector: "unknown",
+                expected: "success",
+                actual: "failure",
+                error: "Execution failed - see logs for details",
+                line: 0,
+            };
+            
+            // Collect failure context
+            let failureContext: FailureContext | null = null;
+            let failureReport: any = null;
+            let selfHealingResult: any = null;
+            
+            try {
+                failureContext = await failureAnalysisService.collectExecutionSnapshot({
+                    browserbaseSession: { sessionId: outcome.sessionId, url: "" },
+                    generatedScript: executableScript,
+                    failedStep,
+                    aiContext: aiContext || {} as AIContext,
+                    repositoryIntelligence: repositoryIntelligence || {} as any,
+                    domSummary: domSummary,
+                    executionId: testCase.id.toString(),
+                });
+                
+                // Analyze failure
+                failureReport = await failureAnalysisService.analyzeFailure(failureContext);
+                logs.push(formatLogLine("[FAILURE]", `Root cause: ${failureReport.rootCause}`));
+                logs.push(formatLogLine("[FAILURE]", `Category: ${failureReport.category}`));
+                logs.push(formatLogLine("[FAILURE]", `Severity: ${failureReport.severity}`));
+                
+                // Attempt self-healing
+                selfHealingResult = await selfHealingService.attemptSelfHealing({
+                    failureContext,
+                    failureReport,
+                    repositoryMemoryService,
+                    repositoryHash,
+                    executeScript: async (script: string) => {
+                        const retryOutcome = await runBrowserbaseScript({
+                            bb,
+                            projectId: process.env.BROWSERBASE_PROJECT_ID || "",
+                            scriptText: script,
+                        });
+                        return {
+                            success: retryOutcome.success,
+                            logs: retryOutcome.logs,
+                            sessionId: retryOutcome.sessionId,
+                            sessionUrl: retryOutcome.sessionUrl,
+                            recordingUrl: retryOutcome.recordingUrl,
+                        };
+                    },
+                    logs,
+                });
+                
+                // Record failure in memory
+                repositoryMemoryService.recordFailureReport(
+                    repositoryHash,
+                    failureReport,
+                    selfHealingResult.attempted,
+                    selfHealingResult.success
+                );
+                
+                // Record failed execution in memory
+                repositoryMemoryService.recordExecutionHistory(repositoryHash, {
+                    executionId: testCase.id.toString(),
+                    route: testCase.targetRoute || "/",
+                    success: selfHealingResult.success,
+                    runtime: 0,
+                    memoryHits: 0,
+                    memoryMisses: 0,
+                });
+                
+                // If self-healing succeeded, update outcome with retry session metadata
+                if (selfHealingResult.success) {
+                    logs.push(formatLogLine("[RECOVERY]", "Self-healing succeeded, updating execution outcome"));
+                    // Update outcome with retry session metadata
+                    outcome.success = true;
+                    outcome.sessionId = selfHealingResult.sessionId;
+                    outcome.sessionUrl = selfHealingResult.sessionUrl;
+                    outcome.recordingUrl = selfHealingResult.recordingUrl;
+                }
+            } catch (analysisError) {
+                logs.push(formatLogLine("[FAILURE]", `Failure analysis error: ${analysisError}`));
+            }
+        }
+        
+        pipelineStages = completePipeline(pipelineStages, outcome.success);
+
+        // Cleanup all registered resources
+        await cleanupManager.cleanupAll();
+        if (tunnelInfo) {
+            tunnelInfo = { ...tunnelInfo, status: "closed" };
+        }
+
+        if (outcome.success) {
+            stateMachine.transition("completed", "cleanup_completed", "route.ts:790");
+            await db
+                .update(TestCasesTable)
+                .set({
+                    status: "passed",
+                    browserbaseScript: scriptText,
+                    logs,
+                    sessionId: outcome.sessionId,
+                    sessionUrl: outcome.sessionUrl,
+                })
+                .where(eq(TestCasesTable.id, testCase.id));
+
+            return NextResponse.json({
+                success: true,
+                status: "passed",
+                logs,
+                sessionId: outcome.sessionId,
+                sessionUrl: outcome.sessionUrl,
+                stages: pipelineStages,
+                tunnel: tunnelInfo,
+                healthReport,
+            });
+        } else {
+            stateMachine.transition("failed", "cleanup_completed", "route.ts:813");
+            await markTestCaseFailed(
+                testCase.id,
+                logs,
+                scriptText,
+                outcome.sessionId,
+                outcome.sessionUrl
+            );
+
+            return NextResponse.json(
+                {
+                    success: false,
+                    status: "failed",
+                    error: "Test execution failed",
+                    logs,
+                    stages: pipelineStages,
+                    tunnel: tunnelInfo,
+                    healthReport,
+                },
+                { status: 500 }
+            );
+        }
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[test-cases/run] API endpoint error:", message);
+
+        // Record error in diagnostics
+        diagnostics.recordEvent("execution_error", { message, isExecutionError: isExecutionError(error) });
+
+        // Transition state machine to failed
+        if (!stateMachine.isTerminal()) {
+            stateMachine.transition("failed", "unexpected_error", "route.ts:844");
+        }
+
+        // Cleanup all registered resources
+        await cleanupManager.cleanupAll();
+        if (tunnelInfo) {
+            tunnelInfo = { ...tunnelInfo, status: "closed" };
+        }
+
+        if (testCaseId) {
+            const failureLogs = [
+                formatLogLine("[ERROR]", `Unexpected execution failure: ${message}`),
+                ...pipelineLogs,
+            ];
+
+            try {
+                await markTestCaseFailed(testCaseId, failureLogs, scriptText);
+            } catch (dbErr) {
+                console.error("[test-cases/run] Failed to update test case status:", dbErr);
+            }
+        }
+
+        return NextResponse.json(
+            {
+                success: false,
+                status: "failed",
+                error: message,
+                logs: [formatLogLine("[ERROR]", message), ...pipelineLogs],
+                stages: pipelineStages.length
+                    ? completePipeline(pipelineStages, false)
+                    : undefined,
+                tunnel: tunnelInfo,
+                healthReport,
+                diagnostics: diagnostics.getSummary(),
+            },
+            { status: 500 }
+        );
+    }
+}
