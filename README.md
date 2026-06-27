@@ -84,20 +84,7 @@ Testiva solves both problems with two systems that don't exist in any other test
 </details>
 
 <details>
-<summary><strong>Execution & Browserbase</strong></summary>
-
-| Test Execution Pipeline | Browserbase Recording |
-|---|---|
-| ![Execution Pipeline](docs/screenshots/execution.png) | ![Browserbase Recording](docs/screenshots/browserbase-recording.png) |
-
-| Repository Settings | Update Test Case |
-|---|---|
-| ![Browserbase Session](public/ReposettingsandInstructions.png) | ![Localhost](public/ReposettingsandInstructions.png) |
-
-</details>
-
-<details>
-<summary><strong>Analysis & Intelligence</strong></summary>
+<summary><strong>Execution & Intelligence</strong></summary>
 
 | Run Test Cases | TestCasesRunning |
 |---|---|
@@ -110,15 +97,12 @@ Testiva solves both problems with two systems that don't exist in any other test
 </details>
 
 <details>
-<summary><strong>Reports & Analytics</strong></summary>
+<summary><strong>Support and Feedback</strong></summary>
 
-| Coverage Report | Analytics Dashboard |
+| Support Testiva | Help Shape Testiva |
 |---|---|
-| ![Coverage](docs/screenshots/coverage.png) | ![Analytics](docs/screenshots/analytics.png) |
+| ![Coverage](public/TestCasesRunning.png) | ![Analytics](public/TestCasesRunning.png) |
 
-| Health Checks | |
-|---|---|
-| ![Health Checks](docs/screenshots/health-checks.png) | |
 
 </details>
 
