@@ -70,7 +70,7 @@ Testiva solves both problems with two systems that don't exist in any other test
 
 | Landing Page | Dashboard |
 |---|---|
-| ![Landing Page](docs/screenshots/landing.png) | ![Dashboard](docs/screenshots/dashboard.png) |
+| ![Landing Page](public/HomePage.png) | ![Dashboard](public/ConnectedRepo.png) |
 
 </details>
 
@@ -79,7 +79,7 @@ Testiva solves both problems with two systems that don't exist in any other test
 
 | Repository Selection | Test Case Generation |
 |---|---|
-| ![Repository Selection](docs/screenshots/repository.png) | ![Test Generation](docs/screenshots/test-generation.png) |
+| ![Repository Selection](public/GenerateTestCases.png) | ![Test Generation](public/TestCasesGenerated.png) |
 
 </details>
 
@@ -90,22 +90,22 @@ Testiva solves both problems with two systems that don't exist in any other test
 |---|---|
 | ![Execution Pipeline](docs/screenshots/execution.png) | ![Browserbase Recording](docs/screenshots/browserbase-recording.png) |
 
-| Browserbase Session | Localhost Execution |
+| Repository Settings | Update Test Case |
 |---|---|
-| ![Browserbase Session](docs/screenshots/browserbase-session.png) | ![Localhost](docs/screenshots/localhost.png) |
+| ![Browserbase Session](public/ReposettingsandInstructions.png) | ![Localhost](public/ReposettingsandInstructions.png) |
 
 </details>
 
 <details>
 <summary><strong>Analysis & Intelligence</strong></summary>
 
-| AI Failure Analysis | AI Context View |
+| Run Test Cases | TestCasesRunning |
 |---|---|
-| ![Failure Analysis](docs/screenshots/failure-analysis.png) | ![AI Context](docs/screenshots/ai-context.png) |
+| ![Failure Analysis](public/RunSelectedTC.png) | ![AI Context](public/TestCasesRunning.png) |
 
-| Repository Intelligence | Environment Discovery |
+| Pass and Failed | Repository Intelligence |
 |---|---|
-| ![Repository Intelligence](docs/screenshots/repo-intelligence.png) | ![Environment](docs/screenshots/environment.png) |
+| ![Repository Intelligence](public/TestCasesRunning.png) | ![Environment](public/Int.png) |
 
 </details>
 
