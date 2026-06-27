@@ -101,7 +101,7 @@ Testiva solves both problems with two systems that don't exist in any other test
 
 | Support Testiva | Help Shape Testiva |
 |---|---|
-| ![Coverage](public/TestCasesRunning.png) | ![Analytics](public/TestCasesRunning.png) |
+| ![Coverage](public/SupportFeedback.png) | ![Analytics](public/HelpShapeTestiva.png) |
 
 
 </details>
