@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="TestivaLogo.png" width="180" alt="TestivaLogo.png" />
+  <img src="public/TestivaLogo.png" width="180" alt="TestivaLogo.png" />
 </p>
 
 <h1 align="center">Testiva</h1>
