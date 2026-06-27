@@ -1101,10 +1101,10 @@ RESEND_API_KEY=re_...
 | `GITHUB_CLIENT_ID` | ✅ | GitHub OAuth app client ID |
 | `GITHUB_CLIENT_SECRET` | ✅ | GitHub OAuth app client secret |
 | `GITHUB_REDIRECT_URI` | ✅ | GitHub OAuth callback URL |
-| `STRIPE_SECRET_KEY` | ❌ | Stripe secret key (for billing) |
-| `STRIPE_WEBHOOK_SECRET` | ❌ | Stripe webhook signing secret |
-| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | ❌ | Stripe public key |
-| `RESEND_API_KEY` | ❌ | Resend email API key |
+| `STRIPE_SECRET_KEY` | ✅ | Stripe secret key (for billing) |
+| `STRIPE_WEBHOOK_SECRET` | ✅ | Stripe webhook signing secret |
+| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | ✅ | Stripe public key |
+| `RESEND_API_KEY` | ✅ | Resend email API key |
 
 ### Database Setup
 
