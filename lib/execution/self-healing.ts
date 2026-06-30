@@ -8,6 +8,7 @@
 import type { FailureContext, FailureReport } from "./failure-analysis";
 import type { RepositoryMemoryService } from "./repository-memory";
 import { PromptBuilders } from "@/lib/ai/prompt-builders";
+import { generateText } from "@/lib/ai/provider";
 
 export interface SelfHealingResult {
     attempted: boolean;
@@ -118,7 +119,8 @@ export class SelfHealingService {
         const repairedScript = await this.generateRepairedScript(
             failureContext,
             repositoryMemoryService,
-            repositoryHash
+            repositoryHash,
+            logs
         );
         
         if (!repairedScript) {
@@ -208,7 +210,8 @@ export class SelfHealingService {
     private async generateRepairedScript(
         failureContext: FailureContext,
         repositoryMemoryService: RepositoryMemoryService,
-        repositoryHash: string
+        repositoryHash: string,
+        logs: string[]
     ): Promise<string | null> {
         const { aiContext, generatedScript, playwrightContext } = failureContext;
         
@@ -226,10 +229,29 @@ export class SelfHealingService {
             repositoryMemoryService,
             repositoryHash
         );
-        
-        // In production, this would call the AI service
-        // For now, return null to indicate AI generation is pending
-        return null;
+
+        try {
+            const { text } = await generateText(prompt);
+
+            const cleanedScript = text
+                .replace(/^```(?:javascript|js)?\s*/i, "")
+                .replace(/```\s*$/i, "")
+                .trim();
+
+            if (!cleanedScript) {
+                logs.push(`[SELF_HEAL] AI returned an empty repaired script after cleanup`);
+                return null;
+            }
+
+            return cleanedScript;
+        } catch (aiError) {
+            logs.push(
+                `[SELF_HEAL] AI repair generation failed: ${
+                    aiError instanceof Error ? aiError.message : String(aiError)
+                }`
+            );
+            return null;
+        }
     }
     
     /**

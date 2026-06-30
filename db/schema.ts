@@ -9,6 +9,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { DiscoveryCacheEntry } from "@/lib/execution/types";
 import type { RepositoryIntelligence } from "@/lib/ai/repository-intelligence";
+import type { RepositoryMemory } from "@/lib/execution/repository-memory";
 
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -34,6 +35,7 @@ export const repositories = pgTable("repositories", {
   globalInstruction: text("global_instruction"),
   uiDiscoveryCache: jsonb("ui_discovery_cache").$type<DiscoveryCacheEntry | null>(),
   repositoryIntelligenceCache: jsonb("repository_intelligence_cache").$type<RepositoryIntelligence | null>(),
+  repositoryMemoryCache: jsonb("repository_memory_cache").$type<RepositoryMemory | null>(),
 });
 
 export const TestCasesTable = pgTable("test_cases", {

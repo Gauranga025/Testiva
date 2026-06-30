@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "@/lib/ai/provider";
 import { db } from "@/db";
-import { TestCasesTable, repositories } from "@/db/schema";
+import { TestCasesTable, repositories, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { cookies } from "next/headers";
+import { currentUser } from "@clerk/nextjs/server";
 import { Browserbase } from "@browserbasehq/sdk";
 import { formatLogLine } from "@/lib/execution/logger";
 import { runBrowserbaseScript } from "@/lib/execution/browserbase-runner";
@@ -44,53 +45,13 @@ import { PromptBuilders } from "@/lib/ai/prompt-builders";
 import { FailureAnalysisService, type FailureContext, type FailedStep } from "@/lib/execution/failure-analysis";
 import { RepositoryMemoryService } from "@/lib/execution/repository-memory";
 import { SelfHealingService } from "@/lib/execution/self-healing";
+import { getRepoTree, readGithubFile } from "@/lib/github";
 
 export const maxDuration = 300;
 
 const bb = new Browserbase({
     apiKey: process.env.BROWSERBASE_API_KEY!,
 });
-
-async function readGithubFile({
-    owner,
-    repo,
-    path,
-    branch,
-    githubToken,
-}: {
-    owner: string;
-    repo: string;
-    path: string;
-    branch: string;
-    githubToken: string;
-}) {
-    const res = await fetch(
-        `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
-        {
-            headers: {
-                Authorization: `Bearer ${githubToken}`,
-                Accept: "application/vnd.github+json",
-            },
-        }
-    );
-
-    if (!res.ok) {
-        return null;
-    }
-
-    const data = await res.json();
-
-    if (!data.content) {
-        return null;
-    }
-
-    const decodedContent = Buffer.from(data.content, "base64").toString("utf-8");
-
-    return {
-        path,
-        content: decodedContent.slice(0, 5000),
-    };
-}
 
 async function resolveGithubToken(bodyToken?: string): Promise<string | null> {
     const cookieStore = await cookies();
@@ -120,12 +81,12 @@ async function fetchRepoContext(
     testCase: typeof TestCasesTable.$inferSelect,
     githubToken: string,
     logs: string[]
-): Promise<string> {
+): Promise<{ contextText: string; codeFiles: { path: string; content: string }[] }> {
     logs.push(formatLogLine("[SYSTEM]", "Analyzing repository files for context..."));
 
     const targetFiles = testCase.targetFiles || [];
     if (targetFiles.length === 0) {
-        return "";
+        return { contextText: "", codeFiles: [] };
     }
 
     const fileContents = await Promise.all(
@@ -140,16 +101,21 @@ async function fetchRepoContext(
         )
     );
 
-    return fileContents
-        .filter(Boolean)
+    const codeFiles = fileContents.filter(
+        (file): file is { path: string; content: string } => Boolean(file)
+    );
+
+    const contextText = codeFiles
         .map(
             (file) => `
-File Path: ${file!.path}
+File Path: ${file.path}
 File Content:
-${file!.content}
+${file.content}
 `
         )
         .join("\n\n----------------------\n\n");
+
+    return { contextText, codeFiles };
 }
 
 export async function POST(req: NextRequest) {
@@ -158,6 +124,8 @@ export async function POST(req: NextRequest) {
     let pipelineStages: PipelineStage[] = [];
     let tunnelInfo: TunnelInfo | null = null;
     let healthReport: HealthReport | null = null;
+    let repoRecord: typeof repositories.$inferSelect | null = null;
+    let repositoryHash = "";
 
     // Initialize production-grade services
     const pipelineLogs: string[] = [];
@@ -181,6 +149,11 @@ export async function POST(req: NextRequest) {
     const selfHealingService = new SelfHealingService();
 
     try {
+        const user = await currentUser();
+        if (!user) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
         const body = await req.json();
         testCaseId = Number(body.testCaseId);
         const baseUrl: string = body.baseUrl;
@@ -211,6 +184,17 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "Test case not found" }, { status: 404 });
         }
 
+        // Verify the authenticated Clerk user owns this test case.
+        const email = user.primaryEmailAddress?.emailAddress ?? "";
+        const [localUser] = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, email));
+
+        if (!localUser || String(testCase.userId) !== String(localUser.id)) {
+            return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+        }
+
         if (testCase.status === "running" && !forceRun) {
             return NextResponse.json(
                 {
@@ -222,7 +206,6 @@ export async function POST(req: NextRequest) {
             );
         }
 
-        let repoRecord = null;
         if (testCase.repoId) {
             const [r] = await db
                 .select()
@@ -357,12 +340,48 @@ export async function POST(req: NextRequest) {
         let aiContext: AIContext | null = null;
 
         if (forceRegenerate) {
-            repoContext = await fetchRepoContext(testCase, githubToken!, pipelineLogs);
-            
+            const { contextText, codeFiles } = await fetchRepoContext(testCase, githubToken!, pipelineLogs);
+            repoContext = contextText;
+
+            // Fetch package.json and the repo file tree for repository analysis
+            let packageJson: any = { dependencies: {}, devDependencies: {} };
+            let repoFilePaths: string[] = testCase.targetFiles || [];
+
+            try {
+                const packageJsonFile = await readGithubFile({
+                    owner: testCase.repoOwner,
+                    repo: testCase.repoName,
+                    branch: testCase.branch || "main",
+                    path: "package.json",
+                    githubToken: githubToken!,
+                });
+                if (packageJsonFile) {
+                    packageJson = JSON.parse(packageJsonFile.content);
+                }
+            } catch (pkgErr) {
+                pipelineLogs.push(
+                    formatLogLine("[SYSTEM]", "Could not read package.json — proceeding with empty dependency list")
+                );
+            }
+
+            try {
+                const tree = await getRepoTree({
+                    owner: testCase.repoOwner,
+                    repo: testCase.repoName,
+                    branch: testCase.branch || "main",
+                    githubToken: githubToken!,
+                });
+                repoFilePaths = tree.map((item: any) => item.path);
+            } catch (treeErr) {
+                pipelineLogs.push(
+                    formatLogLine("[SYSTEM]", "Could not fetch repository file tree — falling back to target files only")
+                );
+            }
+
             // Generate Repository Intelligence
-            const repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
-                packageJson: { dependencies: {}, devDependencies: {} },
-                files: testCase.targetFiles || [],
+            repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
+                packageJson,
+                files: repoFilePaths,
                 envContent: "",
             });
 
@@ -379,27 +398,14 @@ export async function POST(req: NextRequest) {
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Generating new Repository Intelligence")
                 );
-                // In production, this would call repositoryIntelligenceService.analyzeRepository()
-                // with actual repository data from GitHub
-                repositoryIntelligence = {
-                    framework: { name: "Next.js", version: "15", type: "fullstack" },
-                    authentication: { provider: null, type: "oauth", libraries: [] },
-                    database: { type: null, host: null, name: null },
-                    orm: { name: "Drizzle", version: null },
-                    routing: { type: "app-router", basePath: "app" },
-                    middleware: { present: true, type: "nextjs" },
-                    api: { type: "route-handlers", basePath: "app/api" },
-                    forms: { library: null, validation: null },
-                    validation: { library: "zod", schemaLocation: null },
-                    businessModules: [],
-                    libraries: [],
-                    packageManager: "npm",
-                    buildTool: { name: "Next.js", version: "15" },
-                    environmentVariables: [],
-                    architecture: { pattern: "monolith", layers: [] },
-                    analyzedAt: new Date().toISOString(),
+
+                repositoryIntelligence = await repositoryIntelligenceService.analyzeRepository({
+                    packageJson,
+                    files: repoFilePaths,
+                    codeFiles,
+                    envContent: "",
                     repositoryHash,
-                };
+                });
 
                 // Cache the Repository Intelligence
                 if (repoRecord) {
@@ -426,6 +432,13 @@ export async function POST(req: NextRequest) {
             pipelineLogs.push(formatLogLine("[SYSTEM]", "Using cached Playwright script — skipping repository re-analysis"));
             // Use cached Repository Intelligence if available
             repositoryIntelligence = repoRecord?.repositoryIntelligenceCache;
+            repositoryHash =
+                repositoryIntelligence?.repositoryHash ||
+                repositoryIntelligenceService.generateRepositoryHash({
+                    packageJson: { dependencies: {}, devDependencies: {} },
+                    files: testCase.targetFiles || [],
+                    envContent: "",
+                });
         }
 
         pipelineStages = markPipelineStage(pipelineStages, "repository_analysis", "completed");
@@ -499,21 +512,23 @@ export async function POST(req: NextRequest) {
                     isLocalhost: envResult.environmentType === "localhost",
                 },
                 repository: repositoryIntelligence || {
-                    framework: { name: "Next.js", version: "15", type: "fullstack" },
-                    authentication: { provider: null, type: "oauth", libraries: [] },
+                    // Genuine fallback for the case where repositoryIntelligence is null
+                    // (e.g. analyzeRepository() failed or no repo record exists yet).
+                    framework: { name: "unknown", version: "0.0.0", type: "frontend" },
+                    authentication: { provider: null, type: "none", libraries: [] },
                     database: { type: null, host: null, name: null },
-                    orm: { name: "Drizzle", version: null },
-                    routing: { type: "app-router", basePath: "app" },
-                    middleware: { present: true, type: "nextjs" },
-                    api: { type: "route-handlers", basePath: "app/api" },
+                    orm: { name: null, version: null },
+                    routing: { type: "none", basePath: null },
+                    middleware: { present: false, type: "none" },
+                    api: { type: "none", basePath: null },
                     forms: { library: null, validation: null },
-                    validation: { library: "zod", schemaLocation: null },
+                    validation: { library: null, schemaLocation: null },
                     businessModules: [],
                     libraries: [],
-                    packageManager: "npm",
-                    buildTool: { name: "Next.js", version: "15" },
+                    packageManager: "unknown",
+                    buildTool: { name: "unknown", version: "0.0.0" },
                     environmentVariables: [],
-                    architecture: { pattern: "monolith", layers: [] },
+                    architecture: { pattern: "unknown", layers: [] },
                     analyzedAt: new Date().toISOString(),
                     repositoryHash: "",
                 },
@@ -561,7 +576,7 @@ export async function POST(req: NextRequest) {
             });
 
             // Build prompt using PromptBuilders
-            const prompt = PromptBuilders.buildPlaywrightPrompt(aiContext);
+            const prompt = PromptBuilders.buildPlaywrightPrompt(aiContext, repositoryMemoryService, repositoryHash);
 
             try {
                 const { text, provider } = await generateText(prompt);
@@ -666,15 +681,16 @@ export async function POST(req: NextRequest) {
 
         pipelineStages = markPipelineStage(pipelineStages, "execution", outcome.success ? "completed" : "failed");
         
-        // Get repository hash for memory
-        const repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
-            packageJson: { dependencies: {}, devDependencies: {} },
-            files: testCase.targetFiles || [],
-            envContent: "",
-        });
+        // repositoryHash was already computed earlier (during repository_analysis)
+        // so it's available consistently for both script generation and memory.
         
         // Initialize repository memory
         repositoryMemoryService.getRepositoryMemory(repositoryHash, repoRecord?.htmlUrl || "");
+        repositoryMemoryService.loadFromCache(
+            repositoryHash,
+            repoRecord?.htmlUrl || "",
+            repoRecord?.repositoryMemoryCache ?? null
+        );
         
         if (outcome.success) {
             stateMachine.transition("assertions", "execution_completed", "route.ts:680");
@@ -692,8 +708,16 @@ export async function POST(req: NextRequest) {
                 memoryMisses: 0,
             });
         } else {
-            stateMachine.transition("failed", "execution_failed", "route.ts:695");
-            
+            // Don't transition to "failed" yet — self-healing below may still
+            // recover this execution into a passing one. The state machine
+            // only allows failed -> idle, so committing to "failed" here would
+            // make the later transition (after self-healing/cleanup) illegal
+            // even on a successful recovery, throwing
+            // "Invalid state transition from failed to failed".
+            // The final transition to "completed" or "failed" happens once,
+            // after the real outcome (including any self-healing recovery)
+            // is known — see route.ts:829/853 below.
+
             // Failure Analysis and Self-Healing
             logs.push(formatLogLine("[FAILURE]", "Execution failed, starting failure analysis"));
             
@@ -722,6 +746,7 @@ export async function POST(req: NextRequest) {
                     repositoryIntelligence: repositoryIntelligence || {} as any,
                     domSummary: domSummary,
                     executionId: testCase.id.toString(),
+                    logs,
                 });
                 
                 // Analyze failure
@@ -793,7 +818,35 @@ export async function POST(req: NextRequest) {
             tunnelInfo = { ...tunnelInfo, status: "closed" };
         }
 
+        // Persist Repository Memory back to the database (continuing anyway on failure,
+        // same pattern used for repositoryIntelligenceCache writes above).
+        if (repoRecord) {
+            try {
+                const serializedMemory = repositoryMemoryService.serializeForCache(repositoryHash);
+                await db
+                    .update(repositories)
+                    .set({ repositoryMemoryCache: serializedMemory })
+                    .where(eq(repositories.id, repoRecord.id));
+            } catch (memoryCacheErr) {
+                logs.push(
+                    formatLogLine("[ERROR]", "Failed to cache Repository Memory (continuing anyway)")
+                );
+            }
+        }
+
         if (outcome.success) {
+            // If we got here via the original happy path, the state machine is
+            // already past "execution" (see the `if (outcome.success)` branch
+            // above). If we got here via a self-healing recovery, the state
+            // machine is still sitting in "execution" (since we no longer jump
+            // to "failed" prematurely), so route it through the same
+            // assertions -> cleanup -> completed chain the happy path uses,
+            // rather than jumping straight to "completed" (which is not a
+            // legal transition from "execution").
+            if (stateMachine.getCurrentState() === "execution") {
+                stateMachine.transition("assertions", "self_healing_recovered", "route.ts:837");
+                stateMachine.transition("cleanup", "assertions_passed", "route.ts:837");
+            }
             stateMachine.transition("completed", "cleanup_completed", "route.ts:790");
             await db
                 .update(TestCasesTable)
@@ -817,6 +870,10 @@ export async function POST(req: NextRequest) {
                 healthReport,
             });
         } else {
+            // Genuinely failed (execution failed and self-healing did not
+            // recover it). This is the only place "failed" is reached for an
+            // execution-failure path, so there's no risk of a duplicate
+            // failed -> failed transition.
             stateMachine.transition("failed", "cleanup_completed", "route.ts:813");
             await markTestCaseFailed(
                 testCase.id,
@@ -855,6 +912,23 @@ export async function POST(req: NextRequest) {
         await cleanupManager.cleanupAll();
         if (tunnelInfo) {
             tunnelInfo = { ...tunnelInfo, status: "closed" };
+        }
+
+        // Persist Repository Memory back to the database if we got far enough to
+        // have a repoRecord and repositoryHash (continuing anyway on failure).
+        if (repoRecord && repositoryHash) {
+            try {
+                const serializedMemory = repositoryMemoryService.serializeForCache(repositoryHash);
+                await db
+                    .update(repositories)
+                    .set({ repositoryMemoryCache: serializedMemory })
+                    .where(eq(repositories.id, repoRecord.id));
+            } catch (memoryCacheErr) {
+                console.error(
+                    "[test-cases/run] Failed to cache Repository Memory (continuing anyway):",
+                    memoryCacheErr
+                );
+            }
         }
 
         if (testCaseId) {

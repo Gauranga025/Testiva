@@ -3,6 +3,8 @@
  * Analyzes repository structure to extract framework, architecture, and configuration.
  */
 
+import { createHash } from "crypto";
+
 export type Framework = {
     name: string;
     version: string;
@@ -417,7 +419,6 @@ export class RepositoryIntelligenceService {
         envContent?: string;
     }): string {
         const content = JSON.stringify(data.packageJson) + data.files.join(",") + (data.envContent || "");
-        // Simple hash for demonstration - use crypto in production
-        return Buffer.from(content).toString("base64").substring(0, 32);
+        return createHash("sha256").update(content).digest("hex").substring(0, 32);
     }
 }

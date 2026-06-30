@@ -174,17 +174,12 @@ export class RepositoryMemoryService {
     private memoryCache: Map<string, RepositoryMemory> = new Map();
     
     /**
-     * Get repository memory for a specific repository
+     * Build a fresh, empty RepositoryMemory object for a repository.
+     * Shared by getRepositoryMemory() and loadFromCache() so initialization
+     * logic isn't duplicated.
      */
-    getRepositoryMemory(repositoryHash: string, repositoryUrl: string): RepositoryMemory {
-        const cached = this.memoryCache.get(repositoryHash);
-        
-        if (cached) {
-            return cached;
-        }
-        
-        // Initialize new memory
-        const newMemory: RepositoryMemory = {
+    private createFreshMemory(repositoryHash: string, repositoryUrl: string): RepositoryMemory {
+        return {
             repositoryHash,
             repositoryUrl,
             lastUpdated: new Date().toISOString(),
@@ -212,9 +207,54 @@ export class RepositoryMemoryService {
             totalFailures: 0,
             successRate: 0,
         };
+    }
+    
+    /**
+     * Get repository memory for a specific repository
+     */
+    getRepositoryMemory(repositoryHash: string, repositoryUrl: string): RepositoryMemory {
+        const cached = this.memoryCache.get(repositoryHash);
+        
+        if (cached) {
+            return cached;
+        }
+        
+        const newMemory = this.createFreshMemory(repositoryHash, repositoryUrl);
         
         this.memoryCache.set(repositoryHash, newMemory);
         return newMemory;
+    }
+    
+    /**
+     * Populate this.memoryCache from a previously-persisted RepositoryMemory
+     * object (e.g. loaded from repositories.repositoryMemoryCache). If no
+     * cached object is provided, initializes fresh memory instead — this is
+     * what makes it safe to call unconditionally right after the first
+     * getRepositoryMemory() call on a cold start.
+     */
+    loadFromCache(
+        repositoryHash: string,
+        repositoryUrl: string,
+        cached: RepositoryMemory | null
+    ): void {
+        if (cached) {
+            this.memoryCache.set(repositoryHash, cached);
+            return;
+        }
+        
+        // No persisted memory yet — initialize fresh, same as getRepositoryMemory().
+        if (!this.memoryCache.has(repositoryHash)) {
+            this.memoryCache.set(repositoryHash, this.createFreshMemory(repositoryHash, repositoryUrl));
+        }
+    }
+    
+    /**
+     * Return the current in-memory RepositoryMemory object for a given hash
+     * so it can be written back to the database. Returns null if no memory
+     * has been initialized for this hash yet.
+     */
+    serializeForCache(repositoryHash: string): RepositoryMemory | null {
+        return this.memoryCache.get(repositoryHash) ?? null;
     }
     
     /**

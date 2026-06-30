@@ -8,6 +8,8 @@
 import type { AIContext } from "@/lib/ai/ai-context";
 import type { RepositoryIntelligence } from "@/lib/ai/repository-intelligence";
 import type { DomSummary } from "./types";
+import { generateStructured, Type, type GeminiSchema } from "@/lib/ai/provider";
+import { PromptBuilders } from "@/lib/ai/prompt-builders";
 
 // ============================================================================
 // Browser State
@@ -302,6 +304,7 @@ export class FailureAnalysisService {
         repositoryIntelligence: RepositoryIntelligence;
         domSummary: DomSummary | null;
         executionId: string;
+        logs?: string[];
     }): Promise<FailureContext> {
         const {
             browserbaseSession,
@@ -311,6 +314,7 @@ export class FailureAnalysisService {
             repositoryIntelligence,
             domSummary,
             executionId,
+            logs = [],
         } = params;
 
         // Collect browser state
@@ -320,10 +324,10 @@ export class FailureAnalysisService {
         const visualState = await this.collectVisualState(browserbaseSession);
         
         // Collect console logs
-        const consoleLogs = await this.collectConsoleLogs(browserbaseSession);
+        const consoleLogs = await this.collectConsoleLogs(browserbaseSession, logs);
         
         // Collect network logs
-        const networkLogs = await this.collectNetworkLogs(browserbaseSession);
+        const networkLogs = await this.collectNetworkLogs(browserbaseSession, logs);
         
         // Build Playwright context
         const playwrightContext = this.buildPlaywrightContext(
@@ -357,37 +361,94 @@ export class FailureAnalysisService {
      * Analyze failure and generate report
      */
     async analyzeFailure(failureContext: FailureContext): Promise<FailureReport> {
-        // In production, this would call AI to analyze the failure
-        // For now, return a basic report structure
-        
         const category = this.determineFailureCategory(failureContext);
         const severity = this.determineSeverity(failureContext, category);
         const retryRecommended = this.shouldRetry(failureContext, category);
-        
+
+        // Defaults used if the AI call fails — a flaky AI call should never
+        // block failure reporting entirely.
+        let rootCause = "AI analysis pending";
+        let confidenceScore = 0;
+        let suggestedFix = "AI-generated fix pending";
+        let suggestedSelector: string | null = null;
+        let executiveSummary = "AI-generated executive summary pending";
+
+        try {
+            const errorLogs = [
+                `Failed step: ${failureContext.failedStep.action}`,
+                `Selector: ${failureContext.failedStep.selector}`,
+                `Expected: ${failureContext.failedStep.expected}`,
+                `Actual: ${failureContext.failedStep.actual}`,
+                `Error: ${failureContext.failedStep.error}`,
+                ...failureContext.consoleLogs.errors.map((e) => `[CONSOLE ERROR] ${e.message}`),
+                ...failureContext.consoleLogs.warnings.map((w) => `[CONSOLE WARN] ${w.message}`),
+            ];
+
+            const prompt = PromptBuilders.buildFailureAnalysisPrompt(failureContext.aiContext, errorLogs);
+
+            const schema: GeminiSchema = {
+                type: Type.OBJECT,
+                properties: {
+                    rootCause: { type: Type.STRING },
+                    confidenceScore: { type: Type.NUMBER },
+                    suggestedFix: { type: Type.STRING },
+                    suggestedSelector: { type: Type.STRING, nullable: true },
+                    executiveSummary: { type: Type.STRING },
+                    isFlaky: { type: Type.BOOLEAN },
+                },
+                required: [
+                    "rootCause",
+                    "confidenceScore",
+                    "suggestedFix",
+                    "suggestedSelector",
+                    "executiveSummary",
+                    "isFlaky",
+                ],
+            };
+
+            const { data } = await generateStructured<{
+                rootCause: string;
+                confidenceScore: number;
+                suggestedFix: string;
+                suggestedSelector: string | null;
+                executiveSummary: string;
+                isFlaky: boolean;
+            }>(prompt, schema);
+
+            rootCause = data.rootCause;
+            confidenceScore = data.confidenceScore;
+            suggestedFix = data.suggestedFix;
+            suggestedSelector = data.suggestedSelector;
+            executiveSummary = data.executiveSummary;
+        } catch (aiError) {
+            // Fall back to the placeholder strings above rather than throwing —
+            // a flaky AI call should never block failure reporting entirely.
+        }
+
         return {
             executionId: failureContext.executionId,
             timestamp: failureContext.timestamp,
-            
-            rootCause: "AI analysis pending",
-            confidenceScore: 0,
+
+            rootCause,
+            confidenceScore,
             severity,
             category,
-            
+
             affectedFeature: this.extractAffectedFeature(failureContext),
             failedStep: failureContext.failedStep,
             brokenSelector: this.extractBrokenSelector(failureContext),
-            suggestedSelector: null,
-            suggestedFix: "AI-generated fix pending",
-            
+            suggestedSelector,
+            suggestedFix,
+
             retryRecommended,
             retryReason: retryRecommended ? "Selector-related failure, safe to retry" : "Non-retryable failure",
-            
+
             relatedRepositoryFiles: this.extractRelatedFiles(failureContext),
             relatedRoutes: this.extractRelatedRoutes(failureContext),
             relatedApis: this.extractRelatedApis(failureContext),
-            
-            executiveSummary: "AI-generated executive summary pending",
-            
+
+            executiveSummary,
+
             failureContext: {
                 domSummary: failureContext.domSummary,
                 accessibilityTree: failureContext.accessibilityTree,
@@ -413,7 +474,18 @@ export class FailureAnalysisService {
     // ============================================================================
     
     private async collectBrowserState(browserbaseSession: any): Promise<BrowserState> {
-        // In production, this would query the Browserbase session
+        // TODO: To populate this with real data (currentUrl, pageTitle, domSummary,
+        // accessibilityTree, buttons, forms, dialogs, navigation, activeRoute) we need
+        // access to the live Playwright `page` object at the point of failure. Right now
+        // this function only receives `browserbaseSession` (sessionId/url metadata), not
+        // the `page` handle itself. The `page` is created and used inside
+        // lib/execution/browserbase-runner.ts during script execution and is not
+        // currently threaded out to the failure-analysis call site in
+        // app/api/test-cases/run/route.ts. To fix properly: have the runner catch the
+        // failure at the point it occurs (inside the executing script's try/catch) and
+        // call page.url(), page.title(), and an accessibility snapshot there, then pass
+        // those captured values into collectExecutionSnapshot() instead of trying to
+        // reconstruct them after the Browserbase session has likely already ended.
         return {
             currentUrl: browserbaseSession?.url || "",
             expectedUrl: "",
@@ -431,7 +503,12 @@ export class FailureAnalysisService {
     }
     
     private async collectVisualState(browserbaseSession: any): Promise<VisualState> {
-        // In production, this would capture screenshot and recording
+        // TODO: Same constraint as collectBrowserState() above — capturing a real
+        // page.screenshot() requires access to the live Playwright `page` object at the
+        // point of failure, which isn't passed into this function today. The recording
+        // and session URLs are already real (sourced from the Browserbase session
+        // metadata), but the screenshot, viewport, and device fields would need the
+        // runner to capture them at failure time and pass them through.
         return {
             screenshot: "",
             browserbaseRecording: browserbaseSession?.recordingUrl || null,
@@ -451,31 +528,156 @@ export class FailureAnalysisService {
         };
     }
     
-    private async collectConsoleLogs(browserbaseSession: any): Promise<ConsoleState> {
-        // In production, this would collect console logs
-        return {
+    /**
+     * Parse [BROWSER]-prefixed lines (pushed by attachPageListeners in
+     * lib/execution/browser-session.ts) into structured ConsoleLog entries.
+     *
+     * Lines look like:
+     *   "[BROWSER] [LOG] some message"
+     *   "[BROWSER] [WARN] some message"
+     *   "[BROWSER] [ERROR] some message"
+     *   "[BROWSER] Page error: <message>"
+     */
+    private async collectConsoleLogs(browserbaseSession: any, logs: string[] = []): Promise<ConsoleState> {
+        const consoleState: ConsoleState = {
             logs: [],
             warnings: [],
             errors: [],
             unhandledExceptions: [],
         };
+
+        for (const rawLine of logs) {
+            if (!rawLine.startsWith("[BROWSER]")) continue;
+
+            const rest = rawLine.slice("[BROWSER]".length).trim();
+            const timestamp = new Date().toISOString();
+
+            const pageErrorMatch = rest.match(/^Page error:\s*(.*)$/i);
+            if (pageErrorMatch) {
+                const entry: ConsoleLog = {
+                    level: "error",
+                    message: pageErrorMatch[1],
+                    timestamp,
+                    source: "page",
+                };
+                consoleState.errors.push(entry);
+                consoleState.unhandledExceptions.push(entry);
+                continue;
+            }
+
+            const levelMatch = rest.match(/^\[(LOG|WARN|ERROR|INFO|DEBUG)\]\s*(.*)$/i);
+            if (levelMatch) {
+                const rawLevel = levelMatch[1].toLowerCase();
+                const message = levelMatch[2];
+                const level: ConsoleLog["level"] =
+                    rawLevel === "warn" ? "warn" :
+                    rawLevel === "error" ? "error" :
+                    rawLevel === "info" ? "info" :
+                    rawLevel === "debug" ? "debug" : "log";
+
+                const entry: ConsoleLog = {
+                    level,
+                    message,
+                    timestamp,
+                    source: "console",
+                };
+
+                consoleState.logs.push(entry);
+                if (level === "warn") consoleState.warnings.push(entry);
+                if (level === "error") consoleState.errors.push(entry);
+                continue;
+            }
+
+            // Unrecognized [BROWSER] line format — still capture it as a generic log
+            // rather than silently dropping it.
+            consoleState.logs.push({
+                level: "log",
+                message: rest,
+                timestamp,
+                source: "console",
+            });
+        }
+
+        return consoleState;
     }
     
-    private async collectNetworkLogs(browserbaseSession: any): Promise<NetworkState> {
-        // In production, this would collect network logs
+    /**
+     * Parse [NETWORK]-prefixed lines (pushed by attachPageListeners in
+     * lib/execution/browser-session.ts) into structured NetworkRequest entries.
+     *
+     * Lines look like:
+     *   "[NETWORK] Request failed: GET https://example.com — net::ERR_FAILED"
+     *   "[NETWORK] HTTP 404 GET https://example.com/api/users"
+     */
+    private async collectNetworkLogs(browserbaseSession: any, logs: string[] = []): Promise<NetworkState> {
+        const failedRequests: NetworkRequest[] = [];
+        const httpErrors: NetworkRequest[] = [];
+
+        const emptyTiming: RequestTiming = {
+            startTime: 0,
+            dnsLookup: 0,
+            tcpConnection: 0,
+            tlsHandshake: 0,
+            requestSent: 0,
+            waiting: 0,
+            contentDownload: 0,
+            totalTime: 0,
+        };
+
+        for (const rawLine of logs) {
+            if (!rawLine.startsWith("[NETWORK]")) continue;
+
+            const rest = rawLine.slice("[NETWORK]".length).trim();
+            const timestamp = new Date().toISOString();
+
+            const requestFailedMatch = rest.match(/^Request failed:\s*(\S+)\s+(\S+)\s*—\s*(.*)$/);
+            if (requestFailedMatch) {
+                const [, method, url, errorText] = requestFailedMatch;
+                failedRequests.push({
+                    url,
+                    method,
+                    status: 0,
+                    statusText: errorText,
+                    headers: {},
+                    timing: emptyTiming,
+                    size: 0,
+                    timestamp,
+                });
+                continue;
+            }
+
+            const httpErrorMatch = rest.match(/^HTTP (\d+)\s+(\S+)\s+(\S+)$/);
+            if (httpErrorMatch) {
+                const [, statusStr, method, url] = httpErrorMatch;
+                httpErrors.push({
+                    url,
+                    method,
+                    status: parseInt(statusStr, 10),
+                    statusText: "",
+                    headers: {},
+                    timing: emptyTiming,
+                    size: 0,
+                    timestamp,
+                });
+                continue;
+            }
+        }
+
+        const allRequests = [...failedRequests, ...httpErrors];
+
         return {
-            failedRequests: [],
-            httpErrors: [],
+            failedRequests,
+            httpErrors,
             redirects: [],
-            apiResponses: [],
+            apiResponses: httpErrors,
             networkTiming: {
-                totalRequests: 0,
+                totalRequests: allRequests.length,
                 totalSize: 0,
                 averageResponseTime: 0,
                 slowestRequest: null,
                 fastestRequest: null,
             },
-            requestWaterfall: [],
+            requestWaterfall: allRequests,
         };
     }
     

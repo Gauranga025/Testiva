@@ -1,151 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateStructured, Type } from "@/lib/ai/provider";   // ← changed
 import { db, TestCasesTable } from "@/db";
-import { repositories } from "@/db/schema";
+import { repositories, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { cookies } from "next/headers";
+import { getRepoTree, readGithubFile } from "@/lib/github";
+import { currentUser } from "@clerk/nextjs/server";
 
 // ─── removed: const ai = new GoogleGenAI(...)  (now handled by provider) ─────
 
-const ALLOWED_EXTENSIONS = [
-  "js",
-  "jsx",
-  "ts",
-  "tsx",
-  "json",
-  "md",
-];
-
-const IMPORTANT_FILES = [
-  "package.json",
-  "next.config",
-  "middleware",
-  "app/",
-  "pages/",
-  "components/",
-  "src/",
-  "lib/",
-  "utils/",
-  "actions/",
-  "api/",
-  "server/",
-];
-
-const IGNORE_PATHS = [
-  "node_modules",
-  ".next",
-  "dist",
-  "build",
-  ".git",
-  "coverage",
-  "public",
-  "package-lock.json",
-  "yarn.lock",
-  "pnpm-lock.yaml",
-  "png",
-  "jpg",
-  "jpeg",
-  "svg",
-  "webp",
-  "mp4",
-  "mov",
-];
-
-function isUsefulFile(path: string) {
-  const isIgnored = IGNORE_PATHS.some((item) =>
-    path.includes(item)
-  );
-
-  const isAllowedExtension = ALLOWED_EXTENSIONS.some((ext) =>
-    path.endsWith(ext)
-  );
-
-  const isImportantPath = IMPORTANT_FILES.some((item) =>
-    path.includes(item)
-  );
-
-  return !isIgnored && isAllowedExtension && isImportantPath;
-}
-
-async function getRepoTree({
-  owner,
-  repo,
-  branch,
-  githubToken,
-}: {
-  owner: string;
-  repo: string;
-  branch: string;
-  githubToken: string;
-}) {
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
-    {
-      headers: {
-        Authorization: `Bearer ${githubToken}`,
-        Accept: "application/vnd.github+json",
-      },
-    }
-  );
-
-  if (!res.ok) {
-    throw new Error("Failed to fetch GitHub repo tree");
-  }
-
-  const data = await res.json();
-
-  return data.tree
-    .filter((item: any) => item.type === "blob")
-    .filter((item: any) => isUsefulFile(item.path))
-    .slice(0, 25);
-}
-
-async function readGithubFile({
-  owner,
-  repo,
-  path,
-  branch,
-  githubToken,
-}: {
-  owner: string;
-  repo: string;
-  path: string;
-  branch: string;
-  githubToken: string;
-}) {
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`,
-    {
-      headers: {
-        Authorization: `Bearer ${githubToken}`,
-        Accept: "application/vnd.github+json",
-      },
-    }
-  );
-
-  if (!res.ok) {
-    return null;
-  }
-
-  const data = await res.json();
-
-  if (!data.content) {
-    return null;
-  }
-
-  const decodedContent = Buffer.from(
-    data.content,
-    "base64"
-  ).toString("utf-8");
-
-  return {
-    path,
-    content: decodedContent.slice(0, 5000),
-  };
-}
-
 export async function POST(req: NextRequest) {
   try {
+    const user = await currentUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await req.json();
     const cookieStore = await cookies();
     const githubToken = cookieStore.get("gh_token")?.value;
@@ -166,6 +36,18 @@ export async function POST(req: NextRequest) {
         },
         { status: 400 }
       );
+    }
+
+    // Verify the authenticated Clerk user actually owns the local user
+    // record referenced by `userId` in the request body.
+    const email = user.primaryEmailAddress?.emailAddress ?? "";
+    const [localUser] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, email));
+
+    if (!localUser || String(localUser.id) !== String(userId)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     // 1. Get repo tree
