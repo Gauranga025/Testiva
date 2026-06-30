@@ -1,12 +1,30 @@
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { currentUser } from "@clerk/nextjs/server";
+import { db, users } from "@/db";
+import { eq } from "drizzle-orm";
 
 export async function GET() {
-    const cookiesStore = await cookies();
-    const token = cookiesStore.get("gh_token")?.value;
-    if (!token) {
-        return NextResponse.json({ error: "Github token not found" }, { status: 400 });
+    const user = await currentUser();
+    if (!user) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    const email = user.primaryEmailAddress?.emailAddress;
+    if (!email) {
+        return NextResponse.json({ error: "No email found" }, { status: 400 });
+    }
+
+    const [userRecord] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, email));
+
+    if (!userRecord || !userRecord.githubToken) {
+        return NextResponse.json({ error: "GitHub is not connected. Please connect your GitHub account." }, { status: 400 });
+    }
+
+    const token = userRecord.githubToken;
+
     const allRespo: any[] = [];
     let page = 1;
     while (true) {

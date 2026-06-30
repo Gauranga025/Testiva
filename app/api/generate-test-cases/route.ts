@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateStructured, Type } from "@/lib/ai/provider";   // ← changed
-import { db, TestCasesTable } from "@/db";
-import { repositories, users } from "@/db/schema";
+import { db, TestCasesTable, users } from "@/db";
+import { repositories } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { cookies } from "next/headers";
 import { getRepoTree, readGithubFile } from "@/lib/github";
 import { currentUser } from "@clerk/nextjs/server";
 
@@ -17,8 +16,6 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const cookieStore = await cookies();
-    const githubToken = cookieStore.get("gh_token")?.value;
 
     const {
       userId,
@@ -28,19 +25,39 @@ export async function POST(req: NextRequest) {
       branch = "main",
     } = body;
 
-    if (!userId || !owner || !repo || !githubToken) {
+    if (!userId || !owner || !repo) {
       return NextResponse.json(
         {
-          error:
-            "userId, owner, repo and githubToken are required",
+          error: "userId, owner, and repo are required",
         },
         { status: 400 }
       );
     }
 
+    // Get GitHub token from database
+    const email = user.primaryEmailAddress?.emailAddress;
+    if (!email) {
+      return NextResponse.json({ error: "No email found" }, { status: 400 });
+    }
+
+    const [userRecord] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, email));
+
+    if (!userRecord || !userRecord.githubToken) {
+      return NextResponse.json(
+        {
+          error: "GitHub is not connected. Please connect your GitHub account before generating test cases.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const githubToken = userRecord.githubToken;
+
     // Verify the authenticated Clerk user actually owns the local user
     // record referenced by `userId` in the request body.
-    const email = user.primaryEmailAddress?.emailAddress ?? "";
     const [localUser] = await db
       .select()
       .from(users)

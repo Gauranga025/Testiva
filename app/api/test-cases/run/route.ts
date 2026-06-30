@@ -3,7 +3,6 @@ import { generateText } from "@/lib/ai/provider";
 import { db } from "@/db";
 import { TestCasesTable, repositories, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { cookies } from "next/headers";
 import { currentUser } from "@clerk/nextjs/server";
 import { Browserbase } from "@browserbasehq/sdk";
 import { formatLogLine } from "@/lib/execution/logger";
@@ -53,9 +52,23 @@ const bb = new Browserbase({
     apiKey: process.env.BROWSERBASE_API_KEY!,
 });
 
-async function resolveGithubToken(bodyToken?: string): Promise<string | null> {
-    const cookieStore = await cookies();
-    return cookieStore.get("gh_token")?.value ?? bodyToken ?? null;
+async function resolveGithubToken(bodyToken?: string, userEmail?: string): Promise<string | null> {
+    // If token is provided in the body, use it (for backward compatibility)
+    if (bodyToken) {
+        return bodyToken;
+    }
+    
+    // Otherwise, look up from database using the authenticated user's email
+    if (!userEmail) {
+        return null;
+    }
+    
+    const [userRecord] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, userEmail));
+    
+    return userRecord?.githubToken ?? null;
 }
 
 async function markTestCaseFailed(
@@ -253,7 +266,7 @@ export async function POST(req: NextRequest) {
             throw new Error("BROWSERBASE_PROJECT_ID is not configured");
         }
 
-        const githubToken = await resolveGithubToken(bodyGithubToken);
+        const githubToken = await resolveGithubToken(bodyGithubToken, email);
 
         pipelineStages = activatePipelineStage(pipelineStages, "health_checks");
         stateMachine.transition("health_checks", "preflight_start", "route.ts:276");

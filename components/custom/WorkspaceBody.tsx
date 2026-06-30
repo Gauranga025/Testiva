@@ -6,10 +6,10 @@ import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
 import EmptyWorkspace from "./EmptyWorkspace";
 import axios from "axios";
-import { useRouter } from "next/navigation";
-import { cookies } from "next/headers";
+import { useRouter, useSearchParams } from "next/navigation";
 import RepoDialog, { Repo } from "./RepoDialog";
 import UserRepoList from "./UserRepoList";
+import { Loader2 } from "lucide-react";
 
 export type UserRepo = {
   id: number;
@@ -30,37 +30,79 @@ export type UserRepo = {
 
 
 function WorkspaceBody() {
-  //const cookieStore = await cookies();
-  //const token = cookieStore.get("gh_token")?.value;
-  //We are fetching the token on the client side so error, have to fetch on the server side and pass it as a prop to this component
-
-  const { userDetail } = useContext(UserDetailContext); //Using context to get user details
+  const { userDetail } = useContext(UserDetailContext);
   const router = useRouter();
-  const [token, setToken] = useState('');
+  const searchParams = useSearchParams();
+  const [token, setToken] = useState<string | null>(null);
   const [userRepoList, setUserRepoList] = useState<UserRepo[]>([]);
-
-
-  useEffect(() => {
-    GetGithubUserToken();
-
-  }, []);
+  const [isLoadingToken, setIsLoadingToken] = useState(true);
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
 
   useEffect(() => {
-    userDetail && GetUserAddedRepoList();
-  }, [userDetail]);
+    if (!userDetail) return;
+
+    refreshWorkspace();
+}, [userDetail]);
+
+  // Check if user just returned from OAuth callback
+  useEffect(() => {
+    const oauthError = searchParams.get('error');
+    if (oauthError) {
+      setGithubError(`GitHub connection failed: ${oauthError}`);
+      setIsLoadingToken(false);
+    if (userDetail) {
+        refreshWorkspace();
+    }
+    } else {
+      // If no error, refetch token to get the latest state
+      GetGithubUserToken();
+    }
+  }, [searchParams, userDetail]);
+
+  
+
   const GetGithubUserToken = async () => {
-    const result = await axios.get("/api/github/token");
-    console.log(result.data.token);
-    setToken(result.data.token);
+    try {
+      setIsLoadingToken(true);
+      setGithubError(null);
+      const result = await axios.get("/api/github/token");
+      setToken(result.data.token);
+    } catch (error: any) {
+      setGithubError("Failed to check GitHub connection status");
+      setToken(null);
+    } finally {
+      setIsLoadingToken(false);
+    }
   }
+
   const onAddRepo = async () => {
     router.push("/api/github");
   }
+
   const GetUserAddedRepoList = async () => {
-    const result = await axios.get('/api/user-repo?userId=' + userDetail?.id);
-    setUserRepoList(result.data);
-    console.log(result.data);
+    if (!userDetail?.id) return;
+    
+    try {
+      setIsLoadingRepos(true);
+      const result = await axios.get('/api/user-repo?userId=' + userDetail.id);
+      setUserRepoList(result.data);
+    } catch (error) {
+      // Error handled silently, UI shows empty state
+    } finally {
+      setIsLoadingRepos(false);
+    }
   };
+
+ const isGithubConnected =
+     userRepoList.length > 0 || !!token;
+
+ const refreshWorkspace = async () => {
+    await Promise.all([
+        GetGithubUserToken(),
+        GetUserAddedRepoList(),
+    ]);
+};
 
   return (
     <div>
@@ -69,8 +111,8 @@ function WorkspaceBody() {
         <h2 className="text-blue-800 bg-blue-100 px-2 rounded-lg">
           Remaining Credits: {userDetail?.credits}
         </h2>
-        {/* Displaying user credits from context */}
       </div>
+      
       <Card className="mt-5 flex justify-between items-center p-4 border rounded-lg">
         <div className="flex items-center gap-5">
           <Image
@@ -80,22 +122,45 @@ function WorkspaceBody() {
             height={40}
             className="my-10"
           />
-          <h2 className="text-xl font-semibold">
-            Connect Github And Add Repository
-          </h2>
+          <div>
+            <h2 className="text-xl font-semibold">
+              Connect Github And Add Repository
+            </h2>
+            {githubError && (
+              <p className="text-sm text-red-500 mt-1">{githubError}</p>
+            )}
+          </div>
         </div>
         <div>
-          {!token ? <Button onClick={onAddRepo}>Setup </Button> : <RepoDialog setRefreshPage={(refresh: boolean) => GetUserAddedRepoList()} />}
+        
+          {isLoadingToken ? (
+            <Button disabled>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Checking...
+            </Button>
+          ) : !isGithubConnected ? (
+            <Button onClick={onAddRepo}>Setup</Button>
+          ) : (
+            <RepoDialog setRefreshPage={refreshWorkspace} />
+          )}
         </div>
       </Card>
 
-
-      {!userRepoList ? <Card className="mt-10">
-        <CardContent>
-          <EmptyWorkspace />
-        </CardContent>
-      </Card>
-        : <UserRepoList repoList={userRepoList} setReload={() => GetUserAddedRepoList()} />}
+      {isLoadingRepos ? (
+        <Card className="mt-10">
+          <CardContent className="flex items-center justify-center py-10">
+            <Loader2 className="h-8 w-8 animate-spin" />
+          </CardContent>
+        </Card>
+      ) : !userRepoList || userRepoList.length === 0 ? (
+        <Card className="mt-10">
+          <CardContent>
+            <EmptyWorkspace />
+          </CardContent>
+        </Card>
+      ) : (
+        <UserRepoList repoList={userRepoList} setReload={() => GetUserAddedRepoList()} />
+      )}
     </div>
   );
 }

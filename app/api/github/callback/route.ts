@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { currentUser } from "@clerk/nextjs/server";
+import { db, users } from "@/db";
+import { eq } from "drizzle-orm";
 
-export async function GET(req:NextRequest) {
+export async function GET(req: NextRequest) {
     const code = req.nextUrl.searchParams.get("code");
     const state = req.nextUrl.searchParams.get("state");
     const cookieState = req.cookies.get("gh_oauth_state")?.value;
@@ -11,13 +14,13 @@ export async function GET(req:NextRequest) {
         return response;
     }
 
-    if(!code) {
+    if (!code) {
         const response = NextResponse.redirect(new URL('/workspace?error=missing_code', req.url));
         response.cookies.delete("gh_oauth_state");
         return response;
     }
 
-    const res = await fetch ('https://github.com/login/oauth/access_token',{
+    const res = await fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -33,27 +36,51 @@ export async function GET(req:NextRequest) {
     const data = await res.json();
     const token = data.access_token;
 
-    if(!token) {
-        const response = NextResponse.redirect(new URL('/workspace?error=token_exchange-failed', req.url));
+    if (!token) {
+        const response = NextResponse.redirect(new URL('/workspace?error=token_exchange_failed', req.url));
         response.cookies.delete("gh_oauth_state");
         return response;
     }
 
+    // Get the authenticated Clerk user
+    const user = await currentUser();
+    if (!user) {
+        const response = NextResponse.redirect(new URL('/workspace?error=no_user', req.url));
+        response.cookies.delete("gh_oauth_state");
+        return response;
+    }
+
+    const email = user.primaryEmailAddress?.emailAddress;
+    if (!email) {
+        const response = NextResponse.redirect(new URL('/workspace?error=no_email', req.url));
+        response.cookies.delete("gh_oauth_state");
+        return response;
+    }
+
+    // Find or create user in database and update GitHub token
+    const existingUsers = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, email));
+
+    if (existingUsers.length === 0) {
+        await db.insert(users).values({
+            email: email,
+            name: user.firstName || user.username || 'User',
+            githubToken: token,
+        });
+    } else {
+        await db
+            .update(users)
+            .set({ githubToken: token })
+            .where(eq(users.email, email));
+    }
+
     const response = NextResponse.redirect(
-    new URL("/workspace", req.url)
-  );
+        new URL("/workspace", req.url)
+    );
 
-  //Store the token in a cookie
-  response.cookies.set("gh_token", token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7, 
-    // 7 days
-    sameSite: "lax",
-  });
+    response.cookies.delete("gh_oauth_state");
 
-  response.cookies.delete("gh_oauth_state");
-
-  return response;
+    return response;
 }
