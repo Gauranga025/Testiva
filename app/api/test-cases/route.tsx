@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
   const result = await db
     .select()
     .from(TestCasesTable)
-    .where(eq(TestCasesTable.repoId, repoRecord.id));
+    .where(eq(TestCasesTable.repoId, repoIdNum));
 
   return NextResponse.json(result);
 }

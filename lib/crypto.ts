@@ -7,8 +7,8 @@ const TAG_LENGTH = 16;
 const TAG_POSITION = SALT_LENGTH + IV_LENGTH;
 const ENCRYPTED_POSITION = TAG_POSITION + TAG_LENGTH;
 
-const getKey = (keyString: string, salt: Buffer): Buffer => {
-  return crypto.scryptSync(keyString, salt, 32);
+const getKey = (keyString: string): Buffer => {
+  return crypto.scryptSync(keyString, 'salt', 32);
 };
 
 export function encrypt(text: string, keyString: string): string {
@@ -18,7 +18,7 @@ export function encrypt(text: string, keyString: string): string {
 
   const iv = crypto.randomBytes(IV_LENGTH);
   const salt = crypto.randomBytes(SALT_LENGTH);
-  const key = getKey(keyString, salt);
+  const key = getKey(keyString);
 
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
@@ -38,7 +38,7 @@ export function decrypt(encryptedData: string, keyString: string): string {
   const tag = buffer.subarray(TAG_POSITION, ENCRYPTED_POSITION);
   const encrypted = buffer.subarray(ENCRYPTED_POSITION);
 
-  const key = getKey(keyString, salt);
+  const key = getKey(keyString);
 
   const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(tag);

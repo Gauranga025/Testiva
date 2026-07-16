@@ -215,27 +215,13 @@ Important Rules:
       );
     }
 
-    // Resolve internal repositories.id from GitHub repoId for foreign key
-    const [repoRecord] = await db
-      .select()
-      .from(repositories)
-      .where(eq(repositories.repoId, parseInt(repoId, 10)))
-      .limit(1);
-
-    if (!repoRecord) {
-      return NextResponse.json(
-        { error: "Repository not found in database" },
-        { status: 404 }
-      );
-    }
-
     // 5. Save generated test cases to Neon DB
     const insertedTestCases = await db
       .insert(TestCasesTable)
       .values(
         testCases.map((testCase: any) => ({
           userId,
-          repoId: repoRecord.id, // Use internal repositories.id instead of GitHub repoId
+          repoId,
           repoName: repo,
           repoOwner: owner,
           branch,
@@ -257,7 +243,7 @@ Important Rules:
     await db
       .update(repositories)
       .set({ uiDiscoveryCache: null })
-      .where(eq(repositories.id, repoRecord.id));
+      .where(eq(repositories.repoId, parseInt(repoId, 10)));
 
     return NextResponse.json({
       success: true,

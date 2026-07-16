@@ -274,7 +274,7 @@ export async function POST(req: NextRequest) {
             const [r] = await db
                 .select()
                 .from(repositories)
-                .where(eq(repositories.id, testCase.repoId));
+                .where(eq(repositories.repoId, testCase.repoId));
             repoRecord = r ?? null;
         }
 
@@ -295,7 +295,7 @@ export async function POST(req: NextRequest) {
         const normalizedBaseUrl = urlValidator.validateOrThrow(baseUrl);
         const environmentType = resolveEnvironmentType(normalizedBaseUrl, useLocalhost);
         const cacheKey = buildDiscoveryCacheKey({
-            repoId: repoRecord?.repoId ?? null, // Use GitHub repoId from repoRecord
+            repoId: testCase.repoId ?? repoRecord?.repoId ?? null,
             baseUrl: normalizedBaseUrl,
             branch: testCase.branch,
         });
