@@ -15,6 +15,13 @@
       "when": 1782788264230,
       "tag": "0001_add_repository_memory_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784216032775,
+      "tag": "0002_swift_cassandra_nova",
+      "breakpoints": true
     }
   ]
 }

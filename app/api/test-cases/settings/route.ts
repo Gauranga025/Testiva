@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     const [repoRecord] = await db
         .select()
         .from(repositories)
-        .where(eq(repositories.repoId, testCase.repoId))
+        .where(eq(repositories.id, testCase.repoId))
         .limit(1);
 
     if (!repoRecord) {
