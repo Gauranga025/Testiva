@@ -120,9 +120,11 @@ export async function readGithubFile({
     }
 
     const decodedContent = Buffer.from(data.content, "base64").toString("utf-8");
+    const truncated = decodedContent.length > 5000;
 
     return {
         path,
         content: decodedContent.slice(0, 5000),
+        truncated,
     };
 }

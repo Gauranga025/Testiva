@@ -6,12 +6,12 @@ import { eq } from "drizzle-orm";
 export async function GET(req: NextRequest) {
     const user = await currentUser();
     if (!user) {
-        return NextResponse.json({ token: null, error: "Unauthorized" }, { status: 401 });
+        return NextResponse.json({ connected: false, error: "Unauthorized" }, { status: 401 });
     }
 
     const email = user.primaryEmailAddress?.emailAddress;
     if (!email) {
-        return NextResponse.json({ token: null, error: "No email found" }, { status: 400 });
+        return NextResponse.json({ connected: false, error: "No email found" }, { status: 400 });
     }
 
     const [userRecord] = await db
@@ -19,11 +19,9 @@ export async function GET(req: NextRequest) {
         .from(users)
         .where(eq(users.email, email));
 
-    if (!userRecord) {
-        return NextResponse.json({ token: null });
+    if (!userRecord || !userRecord.githubToken) {
+        return NextResponse.json({ connected: false });
     }
 
-    const token = userRecord.githubToken;
-
-    return NextResponse.json({ token });
+    return NextResponse.json({ connected: true });
 } 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
 import { db, users } from "@/db";
 import { eq } from "drizzle-orm";
+import { encrypt } from "@/lib/crypto";
 
 export async function GET(req: NextRequest) {
     const code = req.nextUrl.searchParams.get("code");
@@ -67,12 +68,12 @@ export async function GET(req: NextRequest) {
         await db.insert(users).values({
             email: email,
             name: user.firstName || user.username || 'User',
-            githubToken: token,
+            githubToken: encrypt(token, process.env.TOKEN_ENCRYPTION_KEY || ''),
         });
     } else {
         await db
             .update(users)
-            .set({ githubToken: token })
+            .set({ githubToken: encrypt(token, process.env.TOKEN_ENCRYPTION_KEY || '') })
             .where(eq(users.email, email));
     }
 

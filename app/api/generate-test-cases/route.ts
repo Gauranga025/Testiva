@@ -5,6 +5,9 @@ import { repositories } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getRepoTree, readGithubFile } from "@/lib/github";
 import { currentUser } from "@clerk/nextjs/server";
+import { decrypt } from "@/lib/crypto";
+import { generateTestCasesLimiter } from "@/lib/rate-limiter";
+import { formatLogLine } from "@/lib/execution/logger";
 
 // ─── removed: const ai = new GoogleGenAI(...)  (now handled by provider) ─────
 
@@ -54,7 +57,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const githubToken = userRecord.githubToken;
+    // Rate limit check
+    const rateLimit = generateTestCasesLimiter.consume(userRecord.id);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded. Please try again later." },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)) } }
+      );
+    }
+
+    const githubToken = decrypt(userRecord.githubToken, process.env.TOKEN_ENCRYPTION_KEY || '');
 
     // Verify the authenticated Clerk user actually owns the local user
     // record referenced by `userId` in the request body.
@@ -189,7 +201,7 @@ Important Rules:
       testCases: any[];
     }>(prompt, schema);
 
-    console.log(`[generate-test-cases] AI provider used: ${provider}`);
+    console.log(formatLogLine("[GENERATE_TEST_CASES]", `AI provider used: ${provider}`));
     // ─── changed block end ───────────────────────────────────────────────────
 
     const testCases = aiResult.testCases || [];
@@ -241,7 +253,7 @@ Important Rules:
     });
 
   } catch (error: any) {
-    console.error("Generate test cases error:", error);
+    console.error(formatLogLine("[GENERATE_TEST_CASES]", `Error: ${error.message || String(error)}`));
 
     return NextResponse.json(
       {

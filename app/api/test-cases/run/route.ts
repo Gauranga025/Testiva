@@ -4,8 +4,10 @@ import { db } from "@/db";
 import { TestCasesTable, repositories, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { currentUser } from "@clerk/nextjs/server";
-import { Browserbase } from "@browserbasehq/sdk";
+import { decrypt } from "@/lib/crypto";
+import { runTestCasesLimiter } from "@/lib/rate-limiter";
 import { formatLogLine } from "@/lib/execution/logger";
+import { Browserbase } from "@browserbasehq/sdk";
 import { runBrowserbaseScript } from "@/lib/execution/browserbase-runner";
 import {
     buildDiscoveryCacheEntry,
@@ -46,7 +48,37 @@ import { RepositoryMemoryService } from "@/lib/execution/repository-memory";
 import { SelfHealingService } from "@/lib/execution/self-healing";
 import { getRepoTree, readGithubFile } from "@/lib/github";
 
+// NOTE: export const maxDuration = 300 is a no-op outside Vercel.
+// We use explicit internal timeout below.
+// Production Nginx requirements: proxy_read_timeout and proxy_send_timeout must be set to at least 360s (6 minutes)
+// to accommodate the full pipeline execution time including retries and self-healing.
 export const maxDuration = 300;
+
+// Global in-process concurrency guard to prevent unbounded cloudflared/Browserbase sessions
+// TODO: Long-term fix is moving this route to a background job queue
+const MAX_CONCURRENT_EXECUTIONS = 3;
+let activeExecutions = 0;
+const executionQueue: Array<() => void> = [];
+
+function acquireExecutionSlot(): Promise<void> {
+  return new Promise((resolve) => {
+    if (activeExecutions < MAX_CONCURRENT_EXECUTIONS) {
+      activeExecutions++;
+      resolve();
+    } else {
+      executionQueue.push(resolve);
+    }
+  });
+}
+
+function releaseExecutionSlot() {
+  activeExecutions--;
+  const next = executionQueue.shift();
+  if (next) {
+    activeExecutions++;
+    next();
+  }
+}
 
 const bb = new Browserbase({
     apiKey: process.env.BROWSERBASE_API_KEY!,
@@ -68,7 +100,11 @@ async function resolveGithubToken(bodyToken?: string, userEmail?: string): Promi
         .from(users)
         .where(eq(users.email, userEmail));
     
-    return userRecord?.githubToken ?? null;
+    if (!userRecord?.githubToken) {
+        return null;
+    }
+    
+    return decrypt(userRecord.githubToken, process.env.TOKEN_ENCRYPTION_KEY || '');
 }
 
 async function markTestCaseFailed(
@@ -115,7 +151,7 @@ async function fetchRepoContext(
     );
 
     const codeFiles = fileContents.filter(
-        (file): file is { path: string; content: string } => Boolean(file)
+        (file): file is { path: string; content: string; truncated: boolean } => Boolean(file)
     );
 
     const contextText = codeFiles
@@ -204,11 +240,26 @@ export async function POST(req: NextRequest) {
             .from(users)
             .where(eq(users.email, email));
 
-        if (!localUser || String(testCase.userId) !== String(localUser.id)) {
+        if (!localUser || testCase.userId !== localUser.id) {
             return NextResponse.json({ error: "Forbidden" }, { status: 403 });
         }
 
+        // Rate limit check
+        const rateLimit = runTestCasesLimiter.consume(localUser.id);
+        if (!rateLimit.allowed) {
+            return NextResponse.json(
+                { error: "Rate limit exceeded. Please try again later." },
+                { status: 429, headers: { 'Retry-After': String(Math.ceil((rateLimit.resetAt - Date.now()) / 1000)) } }
+            );
+        }
+
+        // Concurrency guard check
+        await acquireExecutionSlot();
+        let executionSlotReleased = false;
+
         if (testCase.status === "running" && !forceRun) {
+            releaseExecutionSlot();
+            executionSlotReleased = true;
             return NextResponse.json(
                 {
                     success: false,
@@ -223,7 +274,7 @@ export async function POST(req: NextRequest) {
             const [r] = await db
                 .select()
                 .from(repositories)
-                .where(eq(repositories.repoId, parseInt(testCase.repoId, 10)));
+                .where(eq(repositories.repoId, testCase.repoId));
             repoRecord = r ?? null;
         }
 
@@ -268,17 +319,23 @@ export async function POST(req: NextRequest) {
 
         const githubToken = await resolveGithubToken(bodyGithubToken, email);
 
-        pipelineStages = activatePipelineStage(pipelineStages, "health_checks");
-        stateMachine.transition("health_checks", "preflight_start", "route.ts:276");
+        // Wrap entire pipeline execution with explicit internal timeout
+        const timeoutManager = new TimeoutManager({
+            default: 330_000, // 5.5 minutes - fail before Nginx 6-minute timeout
+        });
 
-        healthReport = await runPreflightChecks({
+        const pipelineExecution = async () => {
+            pipelineStages = activatePipelineStage(pipelineStages, "health_checks");
+            stateMachine.transition("health_checks", "preflight_start", "route.ts:276");
+
+            healthReport = await runPreflightChecks({
             baseUrl: normalizedBaseUrl,
             useLocalhost,
             repositoryExists: !!repoRecord,
             githubToken,
             needsGithubToken: forceRegenerate,
             needsAiProviders: forceRegenerate,
-            browserbaseProjectId: process.env.BROWSERBASE_PROJECT_ID,
+            browserbaseProjectId: process.env.BROWSERBASE_PROJECT_ID!,
             logs: pipelineLogs,
         });
 
@@ -481,7 +538,7 @@ export async function POST(req: NextRequest) {
 
             domSummary = await runUiDiscovery({
                 bb,
-                projectId: process.env.BROWSERBASE_PROJECT_ID,
+                projectId: process.env.BROWSERBASE_PROJECT_ID!,
                 targetUrl: discoveryUrl,
                 logs: pipelineLogs,
             });
@@ -686,7 +743,7 @@ export async function POST(req: NextRequest) {
 
         const outcome = await runBrowserbaseScript({
             bb,
-            projectId: process.env.BROWSERBASE_PROJECT_ID,
+            projectId: process.env.BROWSERBASE_PROJECT_ID!,
             scriptText: executableScript,
         });
 
@@ -909,9 +966,20 @@ export async function POST(req: NextRequest) {
                 { status: 500 }
             );
         }
+        };
+
+        // Execute pipeline with timeout
+        try {
+            await timeoutManager.withTimeoutMs(pipelineExecution(), 330_000, "Pipeline execution");
+        } finally {
+            if (!executionSlotReleased) {
+                releaseExecutionSlot();
+            }
+        }
+
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error("[test-cases/run] API endpoint error:", message);
+        console.error(formatLogLine("[TEST_CASES_RUN]", `API endpoint error: ${message}`));
 
         // Record error in diagnostics
         diagnostics.recordEvent("execution_error", { message, isExecutionError: isExecutionError(error) });
@@ -923,9 +991,6 @@ export async function POST(req: NextRequest) {
 
         // Cleanup all registered resources
         await cleanupManager.cleanupAll();
-        if (tunnelInfo) {
-            tunnelInfo = { ...tunnelInfo, status: "closed" };
-        }
 
         // Persist Repository Memory back to the database if we got far enough to
         // have a repoRecord and repositoryHash (continuing anyway on failure).
@@ -937,10 +1002,7 @@ export async function POST(req: NextRequest) {
                     .set({ repositoryMemoryCache: serializedMemory })
                     .where(eq(repositories.id, repoRecord.id));
             } catch (memoryCacheErr) {
-                console.error(
-                    "[test-cases/run] Failed to cache Repository Memory (continuing anyway):",
-                    memoryCacheErr
-                );
+                console.error(formatLogLine("[TEST_CASES_RUN]", `Failed to cache Repository Memory (continuing anyway): ${String(memoryCacheErr)}`));
             }
         }
 
@@ -953,7 +1015,7 @@ export async function POST(req: NextRequest) {
             try {
                 await markTestCaseFailed(testCaseId, failureLogs, scriptText);
             } catch (dbErr) {
-                console.error("[test-cases/run] Failed to update test case status:", dbErr);
+                console.error(formatLogLine("[TEST_CASES_RUN]", `Failed to update test case status: ${String(dbErr)}`));
             }
         }
 

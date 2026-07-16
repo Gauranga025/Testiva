@@ -5,8 +5,9 @@
  *
  * Responsibilities:
  *  - Gemini 2.5 Flash as primary (structured JSON + free-text)
- *  - GPT-4.1 Mini as automatic fallback
+ *  - Groq llama-3.3-70b-versatile as automatic fallback
  *  - 3 retries with exponential backoff on Gemini
+ *  - Timeout on every API call (120s for Gemini, 60s for Groq)
  *  - Consistent logging across every call
  *  - Two public surfaces:
  *      generateStructured()  → for JSON-schema responses (test-case generation)
@@ -18,6 +19,7 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 import Groq from "groq-sdk";
+import { formatLogLine } from "@/lib/execution/logger";
 
 // ─── Clients (instantiated once at module load) ───────────────────────────────
 
@@ -35,6 +37,8 @@ const GEMINI_MODEL  = "gemini-2.5-flash";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 const MAX_RETRIES   = 3;
 const BASE_DELAY_MS = 2000; // doubles each attempt: 2 s → 4 s → 8 s
+const GEMINI_TIMEOUT_MS = 120_000; // 2 minutes
+const GROQ_TIMEOUT_MS = 60_000; // 1 minute
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -79,7 +83,15 @@ function log(
     const ts      = new Date().toISOString();
     const attempt_ = attempt !== null ? ` attempt=${attempt}` : "";
     const extra_   = extra ? " " + JSON.stringify(extra) : "";
-    console.log(`[AI:${level}] ts=${ts} provider=${provider}${attempt_} ${message}${extra_}`);
+    const logLine = formatLogLine(
+        "[AI_PROVIDER]",
+        `ts=${ts} provider=${provider}${attempt_} ${message}${extra_}`
+    );
+    if (level === "ERROR") {
+        console.error(logLine);
+    } else {
+        console.log(logLine);
+    }
 }
 
 async function sleep(ms: number) {
@@ -89,6 +101,23 @@ async function sleep(ms: number) {
 function backoffMs(attempt: number): number {
     // attempt 1 → 2 s, attempt 2 → 4 s, attempt 3 → 8 s
     return BASE_DELAY_MS * Math.pow(2, attempt - 1);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const result = await promise;
+        clearTimeout(timeout);
+        return result;
+    } catch (err) {
+        clearTimeout(timeout);
+        if (controller.signal.aborted) {
+            throw new Error(`${operation} timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    }
 }
 
 function isRetryable(err: unknown): boolean {
@@ -108,10 +137,14 @@ async function geminiText(prompt: string): Promise<string> {
         try {
             log("INFO", "gemini", attempt, "generateText start", { model: GEMINI_MODEL });
 
-            const response = await gemini.models.generateContent({
-                model:    GEMINI_MODEL,
-                contents: prompt,
-            });
+            const response = await withTimeout(
+                gemini.models.generateContent({
+                    model:    GEMINI_MODEL,
+                    contents: prompt,
+                }),
+                GEMINI_TIMEOUT_MS,
+                "Gemini generateContent"
+            );
 
             const text = response.text ?? "";
             if (!text) throw new Error("Gemini returned empty text");
@@ -150,14 +183,18 @@ async function geminiStructured(
         try {
             log("INFO", "gemini", attempt, "generateStructured start", { model: GEMINI_MODEL });
 
-            const response = await gemini.models.generateContent({
-                model:    GEMINI_MODEL,
-                contents: prompt,
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema:   schema,
-                },
-            });
+            const response = await withTimeout(
+                gemini.models.generateContent({
+                    model:    GEMINI_MODEL,
+                    contents: prompt,
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema:   schema,
+                    },
+                }),
+                GEMINI_TIMEOUT_MS,
+                "Gemini generateContent (structured)"
+            );
 
             const raw = response.text ?? "";
             if (!raw) throw new Error("Gemini returned empty structured response");
@@ -193,15 +230,19 @@ async function groqText(prompt: string): Promise<string> {
     });
 
     try {
-        const completion = await groq.chat.completions.create({
-            model: GROQ_MODEL,
-            messages: [
-                {
-                    role: "user",
-                    content: prompt,
-                },
-            ],
-        });
+        const completion = await withTimeout(
+            groq.chat.completions.create({
+                model: GROQ_MODEL,
+                messages: [
+                    {
+                        role: "user",
+                        content: prompt,
+                    },
+                ],
+            }),
+            GROQ_TIMEOUT_MS,
+            "Groq chat.completions.create"
+        );
 
         const text = completion.choices[0]?.message?.content ?? "";
 
@@ -224,8 +265,8 @@ async function groqText(prompt: string): Promise<string> {
     }
 }
 
-// ─── OpenAI fallback: structured JSON ────────────────────────────────────────
-// GPT-4.1 Mini supports JSON mode but not Gemini's responseSchema format.
+// ─── Groq fallback: structured JSON ────────────────────────────────────────────
+// Groq llama-3.3-70b-versatile supports JSON mode but not Gemini's responseSchema format.
 // We ask for JSON via the system prompt and parse the response ourselves.
 
 async function groqStructured(prompt: string): Promise<unknown> {
@@ -234,25 +275,29 @@ async function groqStructured(prompt: string): Promise<unknown> {
     });
 
     try {
-        const completion = await groq.chat.completions.create({
-            model: GROQ_MODEL,
+        const completion = await withTimeout(
+            groq.chat.completions.create({
+                model: GROQ_MODEL,
 
-            messages: [
-                {
-                    role: "system",
-                    content:
-                        "Return ONLY valid JSON matching the schema described by the user. No markdown. No explanation.",
-                },
-                {
-                    role: "user",
-                    content: prompt,
-                },
-            ],
+                messages: [
+                    {
+                        role: "system",
+                        content:
+                            "Return ONLY valid JSON matching the schema described by the user. No markdown. No explanation.",
+                    },
+                    {
+                        role: "user",
+                        content: prompt,
+                    },
+                ],
 
-            response_format: {
-                type: "json_object",
-            },
-        });
+                response_format: {
+                    type: "json_object",
+                },
+            }),
+            GROQ_TIMEOUT_MS,
+            "Groq chat.completions.create (structured)"
+        );
 
         const raw = completion.choices[0]?.message?.content ?? "";
 
