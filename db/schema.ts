@@ -1,6 +1,5 @@
 import {
   integer,
-  index,
   jsonb,
   pgTable,
   serial,
@@ -18,8 +17,6 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   credits: integer("credits").default(1000).notNull(),
-  // NOTE: githubToken is encrypted at rest using AES-256-GCM via lib/crypto.ts
-  // Use encrypt() before writing and decrypt() after reading
   githubToken: text("github_token"),
 });
 
@@ -40,18 +37,14 @@ export const repositories = pgTable("repositories", {
   uiDiscoveryCache: jsonb("ui_discovery_cache").$type<DiscoveryCacheEntry | null>(),
   repositoryIntelligenceCache: jsonb("repository_intelligence_cache").$type<RepositoryIntelligence | null>(),
   repositoryMemoryCache: jsonb("repository_memory_cache").$type<RepositoryMemory | null>(),
-}, (table) => ({
-  repoIdIdx: index("repo_id_idx").on(table.repoId),
-  fullNameIdx: index("full_name_idx").on(table.fullName),
-  userIdIdx: index("user_id_idx").on(table.userId),
-}));
+});
 
 export const TestCasesTable = pgTable("test_cases", {
   id: serial("id").primaryKey(),
 
-  // User / project details - normalized to integers with foreign keys
-  userId: integer("user_id").references(() => users.id).notNull(),
-  repoId: integer("repo_id").references(() => repositories.id),
+  // User / project details
+  userId: varchar("user_id", { length: 255 }).notNull(),
+  repoId: varchar("repo_id", { length: 255 }),
   repoName: varchar("repo_name", { length: 255 }).notNull(),
   repoOwner: varchar("repo_owner", { length: 255 }).notNull(),
   branch: varchar("branch", { length: 100 }).default("main"),
@@ -76,17 +69,6 @@ export const TestCasesTable = pgTable("test_cases", {
   logs: jsonb("logs").$type<string[]>().default([]),
   sessionId: varchar("session_id", {length: 255}),
   sessionUrl: varchar("session_url", {length: 500}),
-}, (table) => ({
-  userIdIdx: index("test_cases_user_id_idx").on(table.userId),
-  repoIdIdx: index("test_cases_repo_id_idx").on(table.repoId),
-  statusIdx: index("test_cases_status_idx").on(table.status),
-}));
-
-export const processedStripeEvents = pgTable("processed_stripe_events", {
-  id: serial("id").primaryKey(),
-  eventId: text("event_id").notNull().unique(),
-  eventType: text("event_type").notNull(),
-  processedAt: timestamp("processed_at").defaultNow().notNull(),
 });
 
 export type User = typeof users.$inferSelect;

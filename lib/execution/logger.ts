@@ -27,10 +27,7 @@ export type LogPrefix =
     | "[IMPACT]"
     | "[ANALYTICS]"
     | "[PERFORMANCE]"
-    | "[OPTIMIZATION]"
-    | "[AI_PROVIDER]"
-    | "[GENERATE_TEST_CASES]"
-    | "[TEST_CASES_RUN]";
+    | "[OPTIMIZATION]";
 
 export function formatLogLine(prefix: LogPrefix, message: string): string {
     return `${prefix} ${message}`;

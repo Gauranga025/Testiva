@@ -67,7 +67,7 @@ function WorkspaceBody() {
       setIsLoadingToken(true);
       setGithubError(null);
       const result = await axios.get("/api/github/token");
-      setToken(result.data.connected ? "connected" : null);
+      setToken(result.data.token);
     } catch (error: any) {
       setGithubError("Failed to check GitHub connection status");
       setToken(null);

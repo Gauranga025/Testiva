@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { currentUser } from "@clerk/nextjs/server";
 import { db, users } from "@/db";
 import { eq } from "drizzle-orm";
-import { decrypt } from "@/lib/crypto";
 
 export async function GET() {
     const user = await currentUser();
@@ -24,38 +23,19 @@ export async function GET() {
         return NextResponse.json({ error: "GitHub is not connected. Please connect your GitHub account." }, { status: 400 });
     }
 
-    const token = decrypt(userRecord.githubToken, process.env.TOKEN_ENCRYPTION_KEY || '');
+    const token = userRecord.githubToken;
 
     const allRespo: any[] = [];
     let page = 1;
-    const MAX_PAGES = 10; // Cap at 1000 repos max
-
-    while (page <= MAX_PAGES) {
+    while (true) {
         const res = await fetch(`https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated`, {
             headers: {
                 Authorization: `Bearer ${token}`,
                 Accept: "application/vnd.github+json"
             }
         });
-
-        // Check for rate limit responses
-        if (res.status === 403 || res.status === 429) {
-            const resetTime = res.headers.get('X-RateLimit-Reset');
-            const retryAfter = res.headers.get('Retry-After');
-            const resetMessage = resetTime 
-                ? `Rate limit exceeded. Resets at ${new Date(parseInt(resetTime) * 1000).toISOString()}`
-                : retryAfter 
-                    ? `Rate limit exceeded. Retry after ${retryAfter} seconds`
-                    : 'Rate limit exceeded';
-            return NextResponse.json({ error: resetMessage }, { status: 429 });
-        }
-
-        if (!res.ok) {
-            return NextResponse.json({ error: `GitHub API error: ${res.status} ${res.statusText}` }, { status: 500 });
-        }
-
         const Respos = await res.json();
-        if (!Array.isArray(Respos) || Respos.length === 0) {
+        if (Respos.length === 0) {
             break;
         }
         allRespo.push(...Respos);
