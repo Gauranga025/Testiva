@@ -14,6 +14,7 @@ import { DialogClose } from "@radix-ui/react-dialog";
 import axios from "axios";
 import { Input } from "../ui/input";
 import { UserDetailContext } from "@/context/UserDetailContext";
+import { UserRepo } from "./WorkspaceBody";
 export type Repo = {
   id: number;
   name: string;
@@ -28,48 +29,83 @@ export type Repo = {
   default_branch: string;
   owner: string;
 };
-function RepoDialog({setRefreshPage}: {setRefreshPage: (refresh: boolean) => void}) {
+function RepoDialog({setRefreshPage, existingRepos}: {setRefreshPage: (refresh: boolean) => void, existingRepos?: UserRepo[]}) {
   const [repoList, setRepoList] = useState<Repo[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<Repo | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const {userDetail} = useContext(UserDetailContext);
   const [isOpen, setIsOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  
   useEffect(() => {
-    GetRepoList();
-  }, []);
+    if (isOpen) {
+      GetRepoList();
+    }
+  }, [isOpen]);
+  
+  // Refresh repo list when existingRepos changes (e.g., after deletion)
+  useEffect(() => {
+    if (isOpen && existingRepos) {
+      GetRepoList();
+    }
+  }, [existingRepos]);
+  
   const GetRepoList = async () => {
-    const result = await axios.get("/api/github/repos");
-    const data = result.data;
-    console.log(data);
-    setRepoList(data);
+    try {
+      const result = await axios.get("/api/github/repos");
+      const data = result.data;
+      setRepoList(data);
+    } catch (error: any) {
+      console.error('Failed to fetch repositories:', error.message);
+    }
   };
   const filteredRepoList = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
+    
+    // Filter out repositories that are already in the workspace
+    const existingRepoIds = existingRepos?.map(r => r.repoId) || [];
+    const availableRepos = repoList.filter(r => !existingRepoIds.includes(r.repoId));
 
-    if (!q) return repoList;
+    if (!q) return availableRepos;
 
-    return repoList.filter((r) => r.full_name.toLowerCase().includes(q));
-  }, [searchTerm, repoList]);
+    return availableRepos.filter((r) => r.full_name.toLowerCase().includes(q));
+  }, [searchTerm, repoList, existingRepos]);
 
   const SaveRepoToDB = async () => {
     if (!selectedRepo) return;
-    const result = await axios.post("/api/user-repo", {
-      id: selectedRepo.id,
-      userId: userDetail?.id,
-      repoId: selectedRepo.repoId,
-      name: selectedRepo.name,
-      full_name: selectedRepo.full_name,
-      private_: selectedRepo.private_,
-      html_url: selectedRepo.html_url,
-      description: selectedRepo.description,
-      updated_at: selectedRepo.updated_at,
-      language: selectedRepo.language,
-      default_branch: selectedRepo.default_branch,
-      owner: selectedRepo.owner,
-    });
-      console.log(result.data);
+    
+    setIsSaving(true);
+    setError(null);
+    
+    try {
+      const result = await axios.post("/api/user-repo", {
+        id: selectedRepo.id,
+        userId: userDetail?.id,
+        repoId: selectedRepo.repoId,
+        name: selectedRepo.name,
+        full_name: selectedRepo.full_name,
+        private_: selectedRepo.private_,
+        html_url: selectedRepo.html_url,
+        description: selectedRepo.description,
+        updated_at: selectedRepo.updated_at,
+        language: selectedRepo.language,
+        default_branch: selectedRepo.default_branch,
+        owner: selectedRepo.owner,
+      });
+      
       setIsOpen(false);
       setRefreshPage(true);
+    } catch (error: any) {
+      if (error.response?.data?.error?.includes('duplicate key') || 
+          error.response?.data?.error?.includes('already exists')) {
+        setError('This repository is already added to your workspace.');
+      } else {
+        setError('Failed to add repository. Please try again.');
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
   return (
     <Dialog open={isOpen} onOpenChange={(open) => setIsOpen(open)}>
@@ -93,19 +129,27 @@ function RepoDialog({setRefreshPage}: {setRefreshPage: (refresh: boolean) => voi
               <li
                 key={repo.id}
                 className={`p-2 hover:bg-muted border-b cursor-pointer ${selectedRepo?.id === repo.id ? "bg-muted" : " "}`}
-                onClick={() => setSelectedRepo(repo)}
+                onClick={() => {
+                  setSelectedRepo(repo);
+                  setError(null);
+                }}
               >
                 {repo.full_name}
               </li>
             ))}
           </ul>
         </div>
+        {error && (
+          <div className="text-sm text-red-500 mt-2">
+            {error}
+          </div>
+        )}
         <DialogFooter className="flex gap-5">
           <DialogClose asChild>
             <Button variant="outline">Cancel</Button>
           </DialogClose>
-          <Button type="button" disabled={!selectedRepo} onClick={SaveRepoToDB}>
-            Add
+          <Button type="button" disabled={!selectedRepo || isSaving} onClick={SaveRepoToDB}>
+            {isSaving ? 'Adding...' : 'Add'}
           </Button>
         </DialogFooter>
       </DialogContent>

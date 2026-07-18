@@ -57,6 +57,7 @@ function UserRepoList({ repoList, setReload }: props) {
     const [loading, setLoading] = useState(false);
     const [testCaseLoading, setTestCaseLoading] = useState(false);
     const [testCases, setTestCases] = useState<TestCase[]>([]);
+    const [deletingRepoId, setDeletingRepoId] = useState<number | null>(null);
 
     const handleGenerateTestCases = async (repo: UserRepo) => {
     try {
@@ -103,6 +104,23 @@ function UserRepoList({ repoList, setReload }: props) {
         setTestCases(result.data);
         setTestCaseLoading(false);
     }
+
+    const handleDeleteRepo = async (repo: UserRepo) => {
+        if (!confirm(`Are you sure you want to delete ${repo.fullName}?`)) {
+            return;
+        }
+
+        setDeletingRepoId(repo.repoId);
+        try {
+            await axios.delete(`/api/user-repo?id=${repo.id}`);
+            setReload();
+        } catch (error) {
+            console.error('Failed to delete repository:', error);
+            alert('Failed to delete repository. Please try again.');
+        } finally {
+            setDeletingRepoId(null);
+        }
+    }
     return (
         <div className='mt-5'>
             <h2 className='text-2xl font-medium mb-5'>Your Connected Repositories</h2>
@@ -114,15 +132,27 @@ function UserRepoList({ repoList, setReload }: props) {
 
                     <AccordionItem key={repo.repoId} value={(repo.repoId).toString()} className="border p-4 rounded-lg mb-2 hover:bg-gray-50 mt-5">
                         <AccordionTrigger>
-                            <div className='flex items-center gap-2'>
-                                <Image src="/GithubIcon.png" alt="Github" width={30} height={30} className='inline-block mr-2' />
-                                <div className='flex flex-col items-start gap-1'>
-                                    <h2>{repo.fullName}</h2>
-                                    <p className='text-sm text-gray-500'>
-                                        {repo.defaultBranch} 🟢 {repo.language} 🟢 {repo.private ? "Private" : "Public"}
-                                    </p>
+                            <div className='flex items-center justify-between w-full'>
+                                <div className='flex items-center gap-2'>
+                                    <Image src="/GithubIcon.png" alt="Github" width={30} height={30} className='inline-block mr-2' />
+                                    <div className='flex flex-col items-start gap-1'>
+                                        <h2>{repo.fullName}</h2>
+                                        <p className='text-sm text-gray-500'>
+                                            {repo.defaultBranch} 🟢 {repo.language} 🟢 {repo.private ? "Private" : "Public"}
+                                        </p>
+                                    </div>
                                 </div>
-
+                                <Button
+                                    variant="destructive"
+                                    size="sm"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDeleteRepo(repo);
+                                    }}
+                                    disabled={deletingRepoId === repo.repoId}
+                                >
+                                    {deletingRepoId === repo.repoId ? 'Deleting...' : 'Delete'}
+                                </Button>
                             </div>
                         </AccordionTrigger>
                         <AccordionContent>

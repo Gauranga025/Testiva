@@ -18,6 +18,8 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   credits: integer("credits").default(1000).notNull(),
   githubToken: text("github_token"),
+  githubUsername: text("github_username"),
+  githubId: integer("github_id").unique(),
 });
 
 export const repositories = pgTable("repositories", {

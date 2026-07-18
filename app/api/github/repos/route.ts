@@ -27,20 +27,41 @@ export async function GET() {
 
     const allRespo: any[] = [];
     let page = 1;
-    while (true) {
+    const MAX_PAGES = 10; // Cap at 1000 repos max
+
+    while (page <= MAX_PAGES) {
         const res = await fetch(`https://api.github.com/user/repos?per_page=100&page=${page}&sort=updated`, {
             headers: {
                 Authorization: `Bearer ${token}`,
                 Accept: "application/vnd.github+json"
             }
         });
+
+        // Check for rate limit responses
+        if (res.status === 403 || res.status === 429) {
+            const resetTime = res.headers.get('X-RateLimit-Reset');
+            const retryAfter = res.headers.get('Retry-After');
+            const resetMessage = resetTime 
+                ? `Rate limit exceeded. Resets at ${new Date(parseInt(resetTime) * 1000).toISOString()}`
+                : retryAfter 
+                    ? `Rate limit exceeded. Retry after ${retryAfter} seconds`
+                    : 'Rate limit exceeded';
+            return NextResponse.json({ error: resetMessage }, { status: 429 });
+        }
+
+        if (!res.ok) {
+            return NextResponse.json({ error: `GitHub API error: ${res.status} ${res.statusText}` }, { status: 500 });
+        }
+
         const Respos = await res.json();
-        if (Respos.length === 0) {
+        
+        if (!Array.isArray(Respos) || Respos.length === 0) {
             break;
         }
         allRespo.push(...Respos);
         page++;
     }
+
     const formattedRepos = allRespo.map((r: any) => ({
         id: r.id,
         userId: r.owner.id,

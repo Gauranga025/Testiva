@@ -38,6 +38,7 @@ function WorkspaceBody() {
   const [isLoadingToken, setIsLoadingToken] = useState(true);
   const [isLoadingRepos, setIsLoadingRepos] = useState(false);
   const [githubError, setGithubError] = useState<string | null>(null);
+  const [isTokenValid, setIsTokenValid] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!userDetail) return;
@@ -49,7 +50,13 @@ function WorkspaceBody() {
   useEffect(() => {
     const oauthError = searchParams.get('error');
     if (oauthError) {
-      setGithubError(`GitHub connection failed: ${oauthError}`);
+      let errorMessage = `GitHub connection failed: ${oauthError}`;
+      
+      if (oauthError === 'github_account_already_connected') {
+        errorMessage = 'This GitHub account is already connected to another user. Please use a different GitHub account or contact support.';
+      }
+      
+      setGithubError(errorMessage);
       setIsLoadingToken(false);
     if (userDetail) {
         refreshWorkspace();
@@ -68,9 +75,24 @@ function WorkspaceBody() {
       setGithubError(null);
       const result = await axios.get("/api/github/token");
       setToken(result.data.token);
+      
+      // Validate token by trying to fetch repos
+      if (result.data.token) {
+        try {
+          const reposResult = await axios.get("/api/github/repos");
+          setIsTokenValid(true);
+        } catch (error: any) {
+          console.log('Token validation failed:', error.message);
+          setIsTokenValid(false);
+          setGithubError("GitHub token is invalid or expired. Please reconnect.");
+        }
+      } else {
+        setIsTokenValid(false);
+      }
     } catch (error: any) {
       setGithubError("Failed to check GitHub connection status");
       setToken(null);
+      setIsTokenValid(false);
     } finally {
       setIsLoadingToken(false);
     }
@@ -96,12 +118,16 @@ function WorkspaceBody() {
 
  const isGithubConnected =
      userRepoList.length > 0 || !!token;
+ const shouldShowReconnect = !!token && isTokenValid === false;
 
  const refreshWorkspace = async () => {
     await Promise.all([
         GetGithubUserToken(),
         GetUserAddedRepoList(),
     ]);
+    
+    // Also trigger repo list refresh in RepoDialog by updating a timestamp or key
+    // This will be handled by the RepoDialog's existing refresh mechanism
 };
 
   return (
@@ -138,10 +164,12 @@ function WorkspaceBody() {
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               Checking...
             </Button>
+          ) : shouldShowReconnect ? (
+            <Button onClick={onAddRepo}>Reconnect GitHub</Button>
           ) : !isGithubConnected ? (
             <Button onClick={onAddRepo}>Setup</Button>
           ) : (
-            <RepoDialog setRefreshPage={refreshWorkspace} />
+            <RepoDialog setRefreshPage={refreshWorkspace} existingRepos={userRepoList} />
           )}
         </div>
       </Card>

@@ -42,6 +42,39 @@ export async function GET(req: NextRequest) {
         return response;
     }
 
+    // Fetch GitHub user info to get GitHub ID and username
+    const userRes = await fetch('https://api.github.com/user', {
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github+json'
+        }
+    });
+
+    if (!userRes.ok) {
+        const response = NextResponse.redirect(new URL('/workspace?error=github_user_fetch_failed', req.url));
+        response.cookies.delete("gh_oauth_state");
+        return response;
+    }
+
+    const githubUser = await userRes.json();
+    const githubId = githubUser.id;
+    const githubUsername = githubUser.login;
+
+    // Check if this GitHub account is already connected to another user
+    const existingGitHubUser = await db
+        .select()
+        .from(users)
+        .where(eq(users.githubId, githubId));
+
+    if (existingGitHubUser.length > 0) {
+        // GitHub account is already connected to another user
+        const response = NextResponse.redirect(
+            new URL('/workspace?error=github_account_already_connected', req.url)
+        );
+        response.cookies.delete("gh_oauth_state");
+        return response;
+    }
+
     // Get the authenticated Clerk user
     const user = await currentUser();
     if (!user) {
@@ -57,7 +90,7 @@ export async function GET(req: NextRequest) {
         return response;
     }
 
-    // Find or create user in database and update GitHub token
+    // Find or create user in database and update GitHub token and user info
     const existingUsers = await db
         .select()
         .from(users)
@@ -68,11 +101,17 @@ export async function GET(req: NextRequest) {
             email: email,
             name: user.firstName || user.username || 'User',
             githubToken: token,
+            githubUsername: githubUsername,
+            githubId: githubId,
         });
     } else {
         await db
             .update(users)
-            .set({ githubToken: token })
+            .set({ 
+                githubToken: token,
+                githubUsername: githubUsername,
+                githubId: githubId,
+            })
             .where(eq(users.email, email));
     }
 
