@@ -132,6 +132,10 @@ ${file.content}
 }
 
 export async function POST(req: NextRequest) {
+    console.log('========================================');
+    console.log('Starting execution');
+    console.log('========================================');
+    
     let testCaseId: number | null = null;
     let scriptText: string | null = null;
     let pipelineStages: PipelineStage[] = [];
@@ -162,11 +166,15 @@ export async function POST(req: NextRequest) {
     const selfHealingService = new SelfHealingService();
 
     try {
+        console.log('[EXECUTION] Authentication check started');
         const user = await currentUser();
         if (!user) {
+            console.log('[EXECUTION] Authentication failed - no user');
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
         }
+        console.log('[EXECUTION] Authentication successful');
 
+        console.log('[EXECUTION] Parsing request body');
         const body = await req.json();
         testCaseId = Number(body.testCaseId);
         const baseUrl: string = body.baseUrl;
@@ -179,25 +187,31 @@ export async function POST(req: NextRequest) {
             body.useLocalhost === undefined ? undefined : body.useLocalhost === true;
 
         if (!testCaseId || !baseUrl) {
+            console.log('[EXECUTION] Validation failed - missing testCaseId or baseUrl');
             return NextResponse.json(
                 { error: "testCaseId and baseUrl are required" },
                 { status: 400 }
             );
         }
+        console.log('[EXECUTION] Request body parsed successfully');
 
         // Transition state machine
         stateMachine.transition("initializing", "request_received", "route.ts:203");
 
+        console.log('[EXECUTION] Fetching test case from database');
         const [testCase] = await db
             .select()
             .from(TestCasesTable)
             .where(eq(TestCasesTable.id, testCaseId));
 
         if (!testCase) {
+            console.log('[EXECUTION] Test case not found');
             return NextResponse.json({ error: "Test case not found" }, { status: 404 });
         }
+        console.log('[EXECUTION] Test case loaded:', testCase.title);
 
         // Verify the authenticated Clerk user owns this test case.
+        console.log('[EXECUTION] Verifying user ownership');
         const email = user.primaryEmailAddress?.emailAddress ?? "";
         const [localUser] = await db
             .select()
@@ -205,10 +219,13 @@ export async function POST(req: NextRequest) {
             .where(eq(users.email, email));
 
         if (!localUser || String(testCase.userId) !== String(localUser.id)) {
+            console.log('[EXECUTION] Ownership verification failed');
             return NextResponse.json({ error: "Forbidden" }, { status: 403 });
         }
+        console.log('[EXECUTION] Ownership verified');
 
         if (testCase.status === "running" && !forceRun) {
+            console.log('[EXECUTION] Test case already running');
             return NextResponse.json(
                 {
                     success: false,
@@ -219,6 +236,7 @@ export async function POST(req: NextRequest) {
             );
         }
 
+        console.log('[EXECUTION] Fetching repository record');
         if (testCase.repoId) {
             const [r] = await db
                 .select()
@@ -236,11 +254,13 @@ export async function POST(req: NextRequest) {
                 );
             repoRecord = r ?? null;
         }
+        console.log('[EXECUTION] Repository loaded:', repoRecord?.fullName || 'not found');
 
         scriptText = testCase.browserbaseScript;
         const forceRegenerate = mode === "generate" || !scriptText;
 
         // Validate URL using new validator
+        console.log('[EXECUTION] Validating URL');
         const normalizedBaseUrl = urlValidator.validateOrThrow(baseUrl);
         const environmentType = resolveEnvironmentType(normalizedBaseUrl, useLocalhost);
         const cacheKey = buildDiscoveryCacheKey({
@@ -248,6 +268,7 @@ export async function POST(req: NextRequest) {
             baseUrl: normalizedBaseUrl,
             branch: testCase.branch,
         });
+        console.log('[EXECUTION] URL validated - environment type:', environmentType);
 
         const needsTunnel = environmentType === "localhost";
         const cachedDiscoveryPreview = refreshDiscovery
@@ -263,14 +284,18 @@ export async function POST(req: NextRequest) {
         });
 
         if (!process.env.BROWSERBASE_PROJECT_ID) {
+            console.log('[EXECUTION] BROWSERBASE_PROJECT_ID not configured');
             throw new Error("BROWSERBASE_PROJECT_ID is not configured");
         }
 
+        console.log('[EXECUTION] Resolving GitHub token');
         const githubToken = await resolveGithubToken(bodyGithubToken, email);
+        console.log('[EXECUTION] GitHub token resolved:', !!githubToken);
 
         pipelineStages = activatePipelineStage(pipelineStages, "health_checks");
         stateMachine.transition("health_checks", "preflight_start", "route.ts:276");
 
+        console.log('[EXECUTION] Running preflight health checks');
         healthReport = await runPreflightChecks({
             baseUrl: normalizedBaseUrl,
             useLocalhost,
@@ -281,6 +306,7 @@ export async function POST(req: NextRequest) {
             browserbaseProjectId: process.env.BROWSERBASE_PROJECT_ID,
             logs: pipelineLogs,
         });
+        console.log('[EXECUTION] Health checks completed - status:', healthReport.ok);
 
         if (!healthReport.ok) {
             const failedChecks = healthReport.checks
@@ -288,6 +314,7 @@ export async function POST(req: NextRequest) {
                 .map((check) => `${check.label}: ${check.message}`)
                 .join("; ");
 
+            console.log('[EXECUTION] Health checks failed:', failedChecks);
             stateMachine.transition("failed", "health_checks_failed", "route.ts:295");
             pipelineStages = markPipelineStage(pipelineStages, "health_checks", "failed");
             pipelineStages = completePipeline(pipelineStages, false);
@@ -315,6 +342,7 @@ export async function POST(req: NextRequest) {
         pipelineStages = markPipelineStage(pipelineStages, "health_checks", "completed");
         pipelineStages = activatePipelineStage(pipelineStages, "environment_discovery");
 
+        console.log('[EXECUTION] Starting environment discovery');
         const { result: envResult, tunnelHandle: createdTunnel } = await discoverEnvironment({
             baseUrl: normalizedBaseUrl,
             useLocalhost,
@@ -327,11 +355,13 @@ export async function POST(req: NextRequest) {
         }
         tunnelInfo = envResult.tunnel;
         const effectiveBaseUrl = envResult.effectiveUrl;
+        console.log('[EXECUTION] Environment discovery complete - effective URL:', effectiveBaseUrl);
 
         stateMachine.transition(needsTunnel ? "tunnel_creation" : "repository_analysis", "environment_discovered", "route.ts:335");
         pipelineStages = markPipelineStage(pipelineStages, "environment_discovery", "completed");
 
         if (needsTunnel) {
+            console.log('[EXECUTION] Tunnel creation started');
             pipelineStages = activatePipelineStage(pipelineStages, "tunnel_creation");
             pipelineStages = markPipelineStage(
                 pipelineStages,
@@ -339,8 +369,10 @@ export async function POST(req: NextRequest) {
                 envResult.tunnel?.status === "connected" ? "completed" : "failed"
             );
             if (envResult.tunnel?.status !== "connected") {
+                console.log('[EXECUTION] Tunnel creation failed');
                 stateMachine.transition("failed", "tunnel_creation_failed", "route.ts:346");
             } else {
+                console.log('[EXECUTION] Tunnel created successfully');
                 stateMachine.transition("repository_analysis", "tunnel_created", "route.ts:348");
                 pipelineStages = activatePipelineStage(pipelineStages, "repository_analysis");
             }
@@ -353,14 +385,17 @@ export async function POST(req: NextRequest) {
         let aiContext: AIContext | null = null;
 
         if (forceRegenerate) {
+            console.log('[EXECUTION] Starting repository analysis');
             const { contextText, codeFiles } = await fetchRepoContext(testCase, githubToken!, pipelineLogs);
             repoContext = contextText;
+            console.log('[EXECUTION] Repository context fetched - files:', codeFiles.length);
 
             // Fetch package.json and the repo file tree for repository analysis
             let packageJson: any = { dependencies: {}, devDependencies: {} };
             let repoFilePaths: string[] = testCase.targetFiles || [];
 
             try {
+                console.log('[EXECUTION] Fetching package.json');
                 const packageJsonFile = await readGithubFile({
                     owner: testCase.repoOwner,
                     repo: testCase.repoName,
@@ -371,13 +406,16 @@ export async function POST(req: NextRequest) {
                 if (packageJsonFile) {
                     packageJson = JSON.parse(packageJsonFile.content);
                 }
+                console.log('[EXECUTION] package.json fetched');
             } catch (pkgErr) {
+                console.log('[EXECUTION] Could not read package.json - proceeding with empty dependencies');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Could not read package.json — proceeding with empty dependency list")
                 );
             }
 
             try {
+                console.log('[EXECUTION] Fetching repository file tree');
                 const tree = await getRepoTree({
                     owner: testCase.repoOwner,
                     repo: testCase.repoName,
@@ -385,7 +423,9 @@ export async function POST(req: NextRequest) {
                     githubToken: githubToken!,
                 });
                 repoFilePaths = tree.map((item: any) => item.path);
+                console.log('[EXECUTION] Repository file tree fetched - files:', repoFilePaths.length);
             } catch (treeErr) {
+                console.log('[EXECUTION] Could not fetch repository file tree - falling back to target files');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Could not fetch repository file tree — falling back to target files only")
                 );
@@ -397,10 +437,12 @@ export async function POST(req: NextRequest) {
                 files: repoFilePaths,
                 envContent: "",
             });
+            console.log('[EXECUTION] Repository hash generated:', repositoryHash);
 
             // Check if we have cached Repository Intelligence that's still valid
             repositoryIntelligence = repoRecord?.repositoryIntelligenceCache;
             if (repositoryIntelligence && repositoryIntelligence.repositoryHash !== repositoryHash) {
+                console.log('[EXECUTION] Repository changed - invalidating cached Repository Intelligence');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Repository changed - invalidating cached Repository Intelligence")
                 );
@@ -408,6 +450,7 @@ export async function POST(req: NextRequest) {
             }
 
             if (!repositoryIntelligence) {
+                console.log('[EXECUTION] Generating new Repository Intelligence');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Generating new Repository Intelligence")
                 );
@@ -419,6 +462,7 @@ export async function POST(req: NextRequest) {
                     envContent: "",
                     repositoryHash,
                 });
+                console.log('[EXECUTION] Repository Intelligence complete');
 
                 // Cache the Repository Intelligence
                 if (repoRecord) {
@@ -427,21 +471,25 @@ export async function POST(req: NextRequest) {
                             .update(repositories)
                             .set({ repositoryIntelligenceCache: repositoryIntelligence })
                             .where(eq(repositories.id, repoRecord.id));
+                        console.log('[EXECUTION] Repository Intelligence cached');
                         pipelineLogs.push(
                             formatLogLine("[SYSTEM]", "Repository Intelligence cached")
                         );
                     } catch (cacheErr) {
+                        console.log('[EXECUTION] Failed to cache Repository Intelligence (continuing anyway)');
                         pipelineLogs.push(
                             formatLogLine("[ERROR]", "Failed to cache Repository Intelligence (continuing anyway)")
                         );
                     }
                 }
             } else {
+                console.log('[EXECUTION] Using cached Repository Intelligence');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Using cached Repository Intelligence")
                 );
             }
         } else {
+            console.log('[EXECUTION] Using cached Playwright script - skipping repository re-analysis');
             pipelineLogs.push(formatLogLine("[SYSTEM]", "Using cached Playwright script — skipping repository re-analysis"));
             // Use cached Repository Intelligence if available
             repositoryIntelligence = repoRecord?.repositoryIntelligenceCache;
@@ -460,17 +508,20 @@ export async function POST(req: NextRequest) {
         const cachedDiscovery = cachedDiscoveryPreview;
 
         if (!forceRegenerate) {
+            console.log('[EXECUTION] Skipping UI discovery for cached script run');
             pipelineLogs.push(formatLogLine("[DISCOVERY]", "Skipping UI discovery for cached script run"));
             stateMachine.transition("playwright_generation", "skipped_discovery", "route.ts:438");
             pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "skipped");
             pipelineStages = markPipelineStage(pipelineStages, "dom_summary", "skipped");
         } else if (cachedDiscovery) {
+            console.log('[EXECUTION] Using cached DOM summary');
             domSummary = cachedDiscovery.domSummary;
             pipelineLogs.push(formatLogLine("[DISCOVERY]", "Using cached DOM summary"));
-            stateMachine.transition("playwright_generation", "cached_discovery", "route.ts:444");
+            // Don't transition to playwright_generation here - will transition in forceRegenerate block
             pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "skipped");
             pipelineStages = markPipelineStage(pipelineStages, "dom_summary", "completed");
         } else {
+            console.log('[EXECUTION] Starting UI discovery');
             stateMachine.transition("ui_discovery", "repository_analyzed", "route.ts:448");
             pipelineStages = activatePipelineStage(pipelineStages, "ui_discovery");
 
@@ -485,6 +536,7 @@ export async function POST(req: NextRequest) {
                 targetUrl: discoveryUrl,
                 logs: pipelineLogs,
             });
+            console.log('[EXECUTION] UI discovery complete');
 
             stateMachine.transition("dom_summary", "ui_discovered", "route.ts:463");
             pipelineStages = markPipelineStage(pipelineStages, "ui_discovery", "completed");
@@ -504,12 +556,14 @@ export async function POST(req: NextRequest) {
                     .update(repositories)
                     .set({ uiDiscoveryCache: cacheEntry })
                     .where(eq(repositories.id, repoRecord.id));
+                console.log('[EXECUTION] UI discovery cached');
             }
         }
 
         const uiContext = domSummary ? summarizeDomForPrompt(domSummary) : "";
 
         if (forceRegenerate) {
+            console.log('[EXECUTION] Building AI context');
             stateMachine.transition("playwright_generation", "dom_summarized", "route.ts:487");
             pipelineStages = activatePipelineStage(pipelineStages, "playwright_generation");
             pipelineLogs.push(
@@ -587,12 +641,16 @@ export async function POST(req: NextRequest) {
                 globalInstructions: repoRecord?.globalInstruction || undefined,
                 runtimeInstructions: customPrompt || undefined,
             });
+            console.log('[EXECUTION] AI context built');
 
             // Build prompt using PromptBuilders
+            console.log('[EXECUTION] Building Playwright prompt');
             const prompt = PromptBuilders.buildPlaywrightPrompt(aiContext, repositoryMemoryService, repositoryHash);
 
             try {
+                console.log('[EXECUTION] Calling AI to generate Playwright script');
                 const { text, provider } = await generateText(prompt);
+                console.log('[EXECUTION] AI response received from provider:', provider);
 
                 let generatedCode = text
                     .replace(/^```(?:javascript|js)?\s*/i, "")
@@ -600,10 +658,12 @@ export async function POST(req: NextRequest) {
                     .trim();
 
                 if (!generatedCode) {
+                    console.log('[EXECUTION] AI returned empty script');
                     throw new Error("AI returned an empty script after cleanup");
                 }
 
                 scriptText = generatedCode;
+                console.log('[EXECUTION] Script generated - length:', scriptText.length);
                 pipelineLogs.push(
                     formatLogLine(
                         "[AI]",
@@ -615,6 +675,8 @@ export async function POST(req: NextRequest) {
             } catch (aiError: unknown) {
                 const message =
                     aiError instanceof Error ? aiError.message : String(aiError);
+                console.log('[EXECUTION] Script generation failed:', message);
+                console.log('[EXECUTION] Error location: route.ts:591');
 
                 stateMachine.transition("failed", "script_generation_failed", "route.ts:591");
                 pipelineStages = markPipelineStage(pipelineStages, "playwright_generation", "failed");
@@ -658,6 +720,7 @@ export async function POST(req: NextRequest) {
                 })
                 .where(eq(TestCasesTable.id, testCase.id));
         } else {
+            console.log('[EXECUTION] Using cached Playwright script');
             pipelineLogs.push(
                 formatLogLine("[SYSTEM]", "Using cached Playwright script from database")
             );
@@ -672,10 +735,12 @@ export async function POST(req: NextRequest) {
         }
 
         if (!scriptText) {
+            console.log('[EXECUTION] No script available');
             stateMachine.transition("failed", "no_script_available", "route.ts:647");
             throw new Error("No Playwright script available for execution");
         }
 
+        console.log('[EXECUTION] Validating and rewriting script for environment');
         const executableScript = rewriteScriptForEnvironment(
             scriptText,
             normalizedBaseUrl,
@@ -684,11 +749,13 @@ export async function POST(req: NextRequest) {
 
         pipelineStages = activatePipelineStage(pipelineStages, "execution");
 
+        console.log('[EXECUTION] Creating Browserbase session');
         const outcome = await runBrowserbaseScript({
             bb,
             projectId: process.env.BROWSERBASE_PROJECT_ID,
             scriptText: executableScript,
         });
+        console.log('[EXECUTION] Browserbase execution completed - success:', outcome.success);
 
         const logs = [...pipelineLogs, ...outcome.logs];
 
@@ -698,6 +765,7 @@ export async function POST(req: NextRequest) {
         // so it's available consistently for both script generation and memory.
         
         // Initialize repository memory
+        console.log('[EXECUTION] Initializing repository memory');
         repositoryMemoryService.getRepositoryMemory(repositoryHash, repoRecord?.htmlUrl || "");
         repositoryMemoryService.loadFromCache(
             repositoryHash,
@@ -706,6 +774,7 @@ export async function POST(req: NextRequest) {
         );
         
         if (outcome.success) {
+            console.log('[EXECUTION] Execution succeeded');
             stateMachine.transition("assertions", "execution_completed", "route.ts:680");
             pipelineStages = activatePipelineStage(pipelineStages, "assertions");
             pipelineStages = markPipelineStage(pipelineStages, "assertions", "completed");
@@ -721,6 +790,7 @@ export async function POST(req: NextRequest) {
                 memoryMisses: 0,
             });
         } else {
+            console.log('[EXECUTION] Execution failed - starting failure analysis');
             // Don't transition to "failed" yet — self-healing below may still
             // recover this execution into a passing one. The state machine
             // only allows failed -> idle, so committing to "failed" here would
@@ -751,6 +821,7 @@ export async function POST(req: NextRequest) {
             let selfHealingResult: any = null;
             
             try {
+                console.log('[EXECUTION] Collecting execution snapshot for failure analysis');
                 failureContext = await failureAnalysisService.collectExecutionSnapshot({
                     browserbaseSession: { sessionId: outcome.sessionId, url: "" },
                     generatedScript: executableScript,
@@ -763,12 +834,15 @@ export async function POST(req: NextRequest) {
                 });
                 
                 // Analyze failure
+                console.log('[EXECUTION] Analyzing failure');
                 failureReport = await failureAnalysisService.analyzeFailure(failureContext);
                 logs.push(formatLogLine("[FAILURE]", `Root cause: ${failureReport.rootCause}`));
                 logs.push(formatLogLine("[FAILURE]", `Category: ${failureReport.category}`));
                 logs.push(formatLogLine("[FAILURE]", `Severity: ${failureReport.severity}`));
+                console.log('[EXECUTION] Failure analysis complete - root cause:', failureReport.rootCause);
                 
                 // Attempt self-healing
+                console.log('[EXECUTION] Attempting self-healing');
                 selfHealingResult = await selfHealingService.attemptSelfHealing({
                     failureContext,
                     failureReport,
@@ -790,6 +864,7 @@ export async function POST(req: NextRequest) {
                     },
                     logs,
                 });
+                console.log('[EXECUTION] Self-healing completed - success:', selfHealingResult.success);
                 
                 // Record failure in memory
                 repositoryMemoryService.recordFailureReport(
@@ -819,17 +894,20 @@ export async function POST(req: NextRequest) {
                     outcome.recordingUrl = selfHealingResult.recordingUrl;
                 }
             } catch (analysisError) {
+                console.log('[EXECUTION] Failure analysis error:', analysisError);
                 logs.push(formatLogLine("[FAILURE]", `Failure analysis error: ${analysisError}`));
             }
         }
         
         pipelineStages = completePipeline(pipelineStages, outcome.success);
 
+        console.log('[EXECUTION] Starting cleanup');
         // Cleanup all registered resources
         await cleanupManager.cleanupAll();
         if (tunnelInfo) {
             tunnelInfo = { ...tunnelInfo, status: "closed" };
         }
+        console.log('[EXECUTION] Cleanup completed');
 
         // Persist Repository Memory back to the database (continuing anyway on failure,
         // same pattern used for repositoryIntelligenceCache writes above).
@@ -840,7 +918,9 @@ export async function POST(req: NextRequest) {
                     .update(repositories)
                     .set({ repositoryMemoryCache: serializedMemory })
                     .where(eq(repositories.id, repoRecord.id));
+                console.log('[EXECUTION] Repository memory cached');
             } catch (memoryCacheErr) {
+                console.log('[EXECUTION] Failed to cache Repository Memory (continuing anyway)');
                 logs.push(
                     formatLogLine("[ERROR]", "Failed to cache Repository Memory (continuing anyway)")
                 );
@@ -848,6 +928,7 @@ export async function POST(req: NextRequest) {
         }
 
         if (outcome.success) {
+            console.log('[EXECUTION] Test passed - updating database');
             // If we got here via the original happy path, the state machine is
             // already past "execution" (see the `if (outcome.success)` branch
             // above). If we got here via a self-healing recovery, the state
@@ -872,6 +953,10 @@ export async function POST(req: NextRequest) {
                 })
                 .where(eq(TestCasesTable.id, testCase.id));
 
+            console.log('========================================');
+            console.log('Execution completed successfully');
+            console.log('========================================');
+
             return NextResponse.json({
                 success: true,
                 status: "passed",
@@ -883,6 +968,7 @@ export async function POST(req: NextRequest) {
                 healthReport,
             });
         } else {
+            console.log('[EXECUTION] Test failed - updating database');
             // Genuinely failed (execution failed and self-healing did not
             // recover it). This is the only place "failed" is reached for an
             // execution-failure path, so there's no risk of a duplicate
@@ -895,6 +981,10 @@ export async function POST(req: NextRequest) {
                 outcome.sessionId,
                 outcome.sessionUrl
             );
+
+            console.log('========================================');
+            console.log('Execution failed');
+            console.log('========================================');
 
             return NextResponse.json(
                 {
@@ -911,7 +1001,9 @@ export async function POST(req: NextRequest) {
         }
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error("[test-cases/run] API endpoint error:", message);
+        console.error('[EXECUTION] API endpoint error:', message);
+        console.error('[EXECUTION] Error location: route.ts:844');
+        console.error('[EXECUTION] Stack trace:', error instanceof Error ? error.stack : 'No stack trace');
 
         // Record error in diagnostics
         diagnostics.recordEvent("execution_error", { message, isExecutionError: isExecutionError(error) });
@@ -921,11 +1013,13 @@ export async function POST(req: NextRequest) {
             stateMachine.transition("failed", "unexpected_error", "route.ts:844");
         }
 
+        console.log('[EXECUTION] Starting cleanup due to error');
         // Cleanup all registered resources
         await cleanupManager.cleanupAll();
         if (tunnelInfo) {
             tunnelInfo = { ...tunnelInfo, status: "closed" };
         }
+        console.log('[EXECUTION] Cleanup completed');
 
         // Persist Repository Memory back to the database if we got far enough to
         // have a repoRecord and repositoryHash (continuing anyway on failure).
@@ -938,7 +1032,7 @@ export async function POST(req: NextRequest) {
                     .where(eq(repositories.id, repoRecord.id));
             } catch (memoryCacheErr) {
                 console.error(
-                    "[test-cases/run] Failed to cache Repository Memory (continuing anyway):",
+                    "[EXECUTION] Failed to cache Repository Memory (continuing anyway):",
                     memoryCacheErr
                 );
             }
@@ -953,9 +1047,13 @@ export async function POST(req: NextRequest) {
             try {
                 await markTestCaseFailed(testCaseId, failureLogs, scriptText);
             } catch (dbErr) {
-                console.error("[test-cases/run] Failed to update test case status:", dbErr);
+                console.error("[EXECUTION] Failed to update test case status:", dbErr);
             }
         }
+
+        console.log('========================================');
+        console.log('Execution failed with error');
+        console.log('========================================');
 
         return NextResponse.json(
             {

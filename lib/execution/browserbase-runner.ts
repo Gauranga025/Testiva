@@ -47,6 +47,7 @@ export async function runBrowserbaseScript(options: {
     scriptText: string;
     executionTimeoutMs?: number;
 }): Promise<ExecutionOutcome> {
+    console.log('[BROWSERBASE] Starting script execution');
     const logs: string[] = [];
     const { push, consoleShim } = createExecutionLogger(logs);
     const timeoutMs = options.executionTimeoutMs ?? DEFAULT_EXECUTION_TIMEOUT_MS;
@@ -55,12 +56,15 @@ export async function runBrowserbaseScript(options: {
     let browser: Browser | null = null;
 
     push("[SYSTEM]", "Validating Playwright script...");
+    console.log('[BROWSERBASE] Validating Playwright script...');
     const { runFn } = compilePlaywrightScript(options.scriptText);
     push("[SYSTEM]", "Script compiled successfully");
+    console.log('[BROWSERBASE] Script compiled successfully');
 
     try {
         push("[PLAYWRIGHT]", "Executing test script in Browserbase cloud browser...");
         push("[SYSTEM]", "Creating Browserbase cloud session...");
+        console.log('[BROWSERBASE] Creating Browserbase cloud session...');
         session = await options.bb.sessions.create({
             projectId: options.projectId,
             timeout: Math.ceil(timeoutMs / 1000) + 60,
@@ -69,27 +73,33 @@ export async function runBrowserbaseScript(options: {
                 logSession: true,
             },
         });
+        console.log('[BROWSERBASE] Session created:', session.id);
 
         const { sessionUrl, recordingUrl } = sessionUrls(session.id);
         push("[SYSTEM]", `Browserbase session created: ${session.id}`);
         push("[SYSTEM]", `Session URL: ${sessionUrl}`);
         push("[SYSTEM]", `Recording URL: ${recordingUrl}`);
+        console.log('[BROWSERBASE] Session URL:', sessionUrl);
 
         push("[SYSTEM]", "Connecting Playwright over CDP...");
+        console.log('[BROWSERBASE] Connecting Playwright over CDP...');
         browser = await withTimeout(
             chromium.connectOverCDP(session.connectUrl),
             CDP_CONNECT_TIMEOUT_MS,
             "CDP connection"
         );
+        console.log('[BROWSERBASE] CDP connection established');
 
         const page = await createBrowserbasePage(browser);
         attachPageListeners(page, logs);
         push("[SYSTEM]", "Connected to Browserbase cloud browser, executing script...");
+        console.log('[BROWSERBASE] Connected to Browserbase cloud browser, executing script...');
 
         const assertHelper = (condition: boolean, message?: string) => {
             if (!condition) {
                 const msg = message || "Assertion failed";
                 push("[ASSERT]", `Failed: ${msg}`);
+                console.log('[BROWSERBASE] Assertion failed:', msg);
                 throw new Error(msg);
             }
         };
@@ -106,25 +116,33 @@ export async function runBrowserbaseScript(options: {
             );
 
         try {
+            console.log('[BROWSERBASE] Executing script (first attempt)...');
             await executeOnce();
+            console.log('[BROWSERBASE] First execution attempt succeeded');
         } catch (firstErr) {
             const firstMessage =
                 firstErr instanceof Error ? firstErr.message : String(firstErr);
+            console.log('[BROWSERBASE] First execution attempt failed:', firstMessage);
             push("[PLAYWRIGHT]", `Execution error: ${firstMessage}`);
             push("[DISCOVERY]", "Refreshing DOM context for one recovery attempt...");
 
             try {
+                console.log('[BROWSERBASE] Attempting recovery with DOM refresh...');
                 await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
                 await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
                 push("[PLAYWRIGHT]", "Retrying script execution after DOM refresh...");
+                console.log('[BROWSERBASE] Retrying script execution after DOM refresh...');
                 await executeOnce();
+                console.log('[BROWSERBASE] Recovery execution succeeded');
             } catch (retryErr) {
+                console.log('[BROWSERBASE] Recovery execution failed:', retryErr);
                 throw retryErr instanceof Error ? retryErr : new Error(String(retryErr));
             }
         }
 
         push("[ASSERT]", "All assertions passed");
         push("[SYSTEM]", "Script execution completed successfully");
+        console.log('[BROWSERBASE] Script execution completed successfully');
 
         return {
             success: true,
@@ -135,6 +153,9 @@ export async function runBrowserbaseScript(options: {
         };
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        const stack = err instanceof Error ? err.stack : '';
+        console.log('[BROWSERBASE] Script execution failed:', message);
+        console.log('[BROWSERBASE] Error stack:', stack);
         push("[ERROR]", `Script execution failed: ${message}`);
 
         return {
@@ -146,9 +167,12 @@ export async function runBrowserbaseScript(options: {
             error: message,
         };
     } finally {
+        console.log('[BROWSERBASE] Cleaning up browser connection...');
         await cleanupBrowser(browser, logs);
         if (session?.id) {
+            console.log('[BROWSERBASE] Releasing Browserbase session:', session.id);
             await releaseBrowserSession(options.bb, session.id, logs);
         }
+        console.log('[BROWSERBASE] Cleanup complete');
     }
 }

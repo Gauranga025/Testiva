@@ -284,10 +284,10 @@ Return coverage report in JSON format:
 Repair a broken Playwright test script.
 
 Test Case:
-- Title: ${context.testCase.title}
-- Description: ${context.testCase.description}
-- Target Route: ${context.testCase.targetRoute}
-- Expected Result: ${context.testCase.expectedResult}
+- Title: ${context.testCase?.title || 'Unknown'}
+- Description: ${context.testCase?.description || 'No description'}
+- Target Route: ${context.testCase?.targetRoute || 'Unknown'}
+- Expected Result: ${context.testCase?.expectedResult || 'Unknown'}
 `;
 
         if (memoryContext) {
@@ -296,17 +296,17 @@ Test Case:
         }
 
         prompt += `Repository Context:
-- Framework: ${context.repository.framework.name}
-- Routing: ${context.repository.routing.type}
-- Forms: ${context.repository.forms.library || "None"}
+- Framework: ${context.repository?.framework?.name || 'Unknown'}
+- Routing: ${context.repository?.routing?.type || 'Unknown'}
+- Forms: ${context.repository?.forms?.library || "None"}
 
 Current UI State:
 ${JSON.stringify({
-    currentUrl: context.uiDiscovery.currentUrl,
-    buttons: context.uiDiscovery.buttons.slice(0, 15),
-    forms: context.uiDiscovery.forms.slice(0, 3),
-    loginDiscovery: context.uiDiscovery.loginDiscovery,
-    dropdowns: context.uiDiscovery.dropdowns.slice(0, 5),
+    currentUrl: context.uiDiscovery?.currentUrl || '',
+    buttons: context.uiDiscovery?.buttons?.slice(0, 15) || [],
+    forms: context.uiDiscovery?.forms?.slice(0, 3) || [],
+    loginDiscovery: context.uiDiscovery?.loginDiscovery || null,
+    dropdowns: context.uiDiscovery?.dropdowns?.slice(0, 5) || [],
 }, null, 2)}
 
 Broken Script:
