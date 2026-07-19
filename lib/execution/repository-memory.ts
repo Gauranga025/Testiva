@@ -43,10 +43,6 @@ export interface RepositoryMemory {
     // Failure Reports
     failureReports: FailureReportMemory[];
     
-    // Analytics & Accessibility
-    accessibilityReport: any | null;
-    analyticsData: any | null;
-    
     // Metadata
     totalExecutions: number;
     totalSuccesses: number;
@@ -205,9 +201,6 @@ export class RepositoryMemoryService {
             executionHistory: [],
             coverageHistory: [],
             failureReports: [],
-            
-            accessibilityReport: null,
-            analyticsData: null,
             
             totalExecutions: 0,
             totalSuccesses: 0,

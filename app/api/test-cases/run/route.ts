@@ -393,7 +393,6 @@ export async function POST(req: NextRequest) {
             // Fetch package.json and the repo file tree for repository analysis
             let packageJson: any = { dependencies: {}, devDependencies: {} };
             let repoFilePaths: string[] = testCase.targetFiles || [];
-            let envContent = "";
 
             try {
                 console.log('[EXECUTION] Fetching package.json');
@@ -412,41 +411,6 @@ export async function POST(req: NextRequest) {
                 console.log('[EXECUTION] Could not read package.json - proceeding with empty dependencies');
                 pipelineLogs.push(
                     formatLogLine("[SYSTEM]", "Could not read package.json — proceeding with empty dependency list")
-                );
-            }
-
-            // Fetch environment variable example file for Repository Intelligence
-            try {
-                console.log('[EXECUTION] Fetching environment variable example file');
-                const envExampleFiles = [".env.example", ".env.sample", ".env.template"];
-                let envFileContent = "";
-                
-                for (const envFileName of envExampleFiles) {
-                    try {
-                        const envFile = await readGithubFile({
-                            owner: testCase.repoOwner,
-                            repo: testCase.repoName,
-                            branch: testCase.branch || "main",
-                            path: envFileName,
-                            githubToken: githubToken!,
-                        });
-                        if (envFile && envFile.content) {
-                            envFileContent = envFile.content;
-                            console.log('[EXECUTION] Environment variable file fetched:', envFileName);
-                            break;
-                        }
-                    } catch (envErr) {
-                        // Try next file
-                        continue;
-                    }
-                }
-                
-                envContent = envFileContent;
-                console.log('[EXECUTION] Environment variable content length:', envContent.length);
-            } catch (envErr) {
-                console.log('[EXECUTION] Could not read environment variable example file - proceeding with empty env content');
-                pipelineLogs.push(
-                    formatLogLine("[SYSTEM]", "Could not read environment variable example file — proceeding with empty env content")
                 );
             }
 
@@ -471,7 +435,7 @@ export async function POST(req: NextRequest) {
             repositoryHash = repositoryIntelligenceService.generateRepositoryHash({
                 packageJson,
                 files: repoFilePaths,
-                envContent,
+                envContent: "",
             });
             console.log('[EXECUTION] Repository hash generated:', repositoryHash);
 
@@ -495,7 +459,7 @@ export async function POST(req: NextRequest) {
                     packageJson,
                     files: repoFilePaths,
                     codeFiles,
-                    envContent,
+                    envContent: "",
                     repositoryHash,
                 });
                 console.log('[EXECUTION] Repository Intelligence complete');
@@ -825,68 +789,6 @@ export async function POST(req: NextRequest) {
                 memoryHits: 0,
                 memoryMisses: 0,
             });
-
-            // Run accessibility audit (non-fatal)
-            try {
-                if (domSummary) {
-                    console.log('[EXECUTION] Running accessibility audit');
-                    const { AccessibilityAuditService } = await import("@/lib/accessibility/accessibility-audit");
-                    const accessibilityService = new AccessibilityAuditService();
-                    const accessibilityReport = await accessibilityService.performAudit({
-                        page: null, // No live page available after execution
-                        domSummary,
-                        url: effectiveBaseUrl,
-                        executionId: testCase.id.toString(),
-                    });
-                    
-                    const memory = repositoryMemoryService.serializeForCache(repositoryHash);
-                    if (memory) {
-                        memory.accessibilityReport = accessibilityReport;
-                    }
-                    console.log('[EXECUTION] Accessibility audit completed');
-                }
-            } catch (accessibilityErr) {
-                console.log('[EXECUTION] Accessibility audit failed - continuing without it:', accessibilityErr);
-                pipelineLogs.push(
-                    formatLogLine("[SYSTEM]", "Accessibility audit failed — continuing without it")
-                );
-            }
-
-            // Run analytics update (non-fatal)
-            try {
-                console.log('[EXECUTION] Running analytics update');
-                const { AnalyticsEngine } = await import("@/lib/analytics/analytics-engine");
-                const analyticsEngine = new AnalyticsEngine();
-                const routesTouched = domSummary?.routes?.map(r => r.path) || [];
-                
-                analyticsEngine.recordExecution({
-                    executionId: testCase.id.toString(),
-                    timestamp: new Date().toISOString(),
-                    repositoryHash,
-                    route: testCase.targetRoute || "/",
-                    success: true,
-                    runtime: 0,
-                    tokenUsage: 0,
-                    aiCostEstimate: 0,
-                    retryCount: 0,
-                    selfHealingSuccess: false,
-                    accessibilityScore: 0,
-                    apiCoverage: routesTouched.length > 0 ? 100 : 0,
-                    visualRegressionScore: 100,
-                });
-                
-                const analyticsData = analyticsEngine.generateReport();
-                const memory = repositoryMemoryService.serializeForCache(repositoryHash);
-                if (memory) {
-                    memory.analyticsData = analyticsData;
-                }
-                console.log('[EXECUTION] Analytics update completed');
-            } catch (analyticsErr) {
-                console.log('[EXECUTION] Analytics update failed - continuing without it:', analyticsErr);
-                pipelineLogs.push(
-                    formatLogLine("[SYSTEM]", "Analytics update failed — continuing without it")
-                );
-            }
         } else {
             console.log('[EXECUTION] Execution failed - starting failure analysis');
             // Don't transition to "failed" yet — self-healing below may still

@@ -5,7 +5,6 @@
  */
 
 import type { AIContext } from "./ai-context";
-import { AIContextEngine } from "./ai-context";
 import type { RepositoryMemoryService } from "@/lib/execution/repository-memory";
 
 export class PromptBuilders {
@@ -74,12 +73,27 @@ Test Case:
             prompt += `\n[RUNTIME INSTRUCTIONS]:\n${context.runtimeInstructions}\n`;
         }
 
-        const aiContextEngine = new AIContextEngine();
-        const contextJson = aiContextEngine.buildCompactJSON(context);
-
         prompt += `
 Repository Intelligence (framework, architecture, patterns):
-${contextJson}
+- Framework: ${context.repository.framework.name} ${context.repository.framework.version}
+- Authentication: ${context.repository.authentication.provider || "None"} (${context.repository.authentication.type})
+- Routing: ${context.repository.routing.type}
+- Forms: ${context.repository.forms.library || "None"}
+- Validation: ${context.repository.validation.library || "None"}
+- Architecture: ${context.repository.architecture.pattern}
+
+Live UI Discovery (what actually exists on the running app — USE THIS for selectors and routes):
+${JSON.stringify({
+    currentUrl: context.uiDiscovery.currentUrl,
+    finalUrl: context.uiDiscovery.finalUrl,
+    navigation: context.uiDiscovery.navigation.slice(0, 20),
+    buttons: context.uiDiscovery.buttons.slice(0, 30),
+    forms: context.uiDiscovery.forms.slice(0, 5),
+    routes: context.uiDiscovery.routes.slice(0, 20),
+    loginDiscovery: context.uiDiscovery.loginDiscovery,
+    dropdowns: context.uiDiscovery.dropdowns.slice(0, 10),
+    accessibility: context.uiDiscovery.accessibility.slice(0, 15),
+}, null, 2)}
 
 Runtime environment (already injected — do NOT import modules):
 - page: Playwright Page object
@@ -118,14 +132,24 @@ Return ONLY raw executable JavaScript. No markdown fences. No explanation.
      * Build test generation prompt
      */
     static buildTestGenerationPrompt(context: AIContext): string {
-        const aiContextEngine = new AIContextEngine();
-        const contextJson = aiContextEngine.buildCompactJSON(context);
-
         let prompt = `You are an expert QA automation engineer.
 Generate comprehensive test cases for an application.
 
-Repository Information and UI Discovery:
-${contextJson}
+Repository Information:
+- Framework: ${context.repository.framework.name} ${context.repository.framework.version}
+- Authentication: ${context.repository.authentication.provider || "None"}
+- Routing: ${context.repository.routing.type}
+- API: ${context.repository.api.type}
+- Architecture: ${context.repository.architecture.pattern}
+
+Available Routes:
+${context.uiDiscovery.routes.map(r => `- ${r.path}: ${r.label}`).join("\n")}
+
+Available UI Components:
+- Navigation: ${context.uiDiscovery.navigation.length} items
+- Buttons: ${context.uiDiscovery.buttons.length} items
+- Forms: ${context.uiDiscovery.forms.length} forms
+- Tables: ${context.uiDiscovery.tables.length} tables
 
 Generate test cases that:
 1. Cover critical user flows
@@ -154,9 +178,6 @@ Return test cases in JSON format:
      * Build failure analysis prompt
      */
     static buildFailureAnalysisPrompt(context: AIContext, errorLogs: string[]): string {
-        const aiContextEngine = new AIContextEngine();
-        const contextJson = aiContextEngine.buildCompactJSON(context);
-
         let prompt = `You are an expert QA automation engineer.
 Analyze the following test execution failure and provide a diagnosis.
 
@@ -166,8 +187,18 @@ Test Case:
 - Target Route: ${context.testCase.targetRoute}
 - Expected Result: ${context.testCase.expectedResult}
 
-Repository Context and UI Discovery:
-${contextJson}
+Repository Context:
+- Framework: ${context.repository.framework.name}
+- Authentication: ${context.repository.authentication.provider || "None"}
+- Routing: ${context.repository.routing.type}
+
+UI Discovery at Failure:
+${JSON.stringify({
+    currentUrl: context.uiDiscovery.currentUrl,
+    buttons: context.uiDiscovery.buttons.slice(0, 10),
+    forms: context.uiDiscovery.forms.slice(0, 3),
+    loginDiscovery: context.uiDiscovery.loginDiscovery,
+}, null, 2)}
 
 Error Logs:
 ${errorLogs.join("\n")}
@@ -178,15 +209,6 @@ Provide:
 3. Suggested fix (code or configuration)
 4. Whether this is a flaky test or genuine issue
 5. Recommended retry strategy if applicable
-6. Failure category (one of: authentication, network, api_failure, playwright, ui_change, navigation, infrastructure)
-   - navigation: page did not reach expected URL/route after an action
-   - authentication: login/auth related failures
-   - network: network connectivity issues
-   - api_failure: API endpoint failures (4xx/5xx)
-   - playwright: Playwright execution errors
-   - ui_change: UI element changes or selector issues
-   - infrastructure: infrastructure/environment issues
-7. Whether retry is recommended (boolean)
 `;
 
         return prompt;
@@ -196,14 +218,16 @@ Provide:
      * Build coverage analysis prompt
      */
     static buildCoveragePrompt(context: AIContext, existingTests: any[]): string {
-        const aiContextEngine = new AIContextEngine();
-        const contextJson = aiContextEngine.buildCompactJSON(context);
-
         let prompt = `You are an expert QA automation engineer.
 Analyze test coverage for an application.
 
-Repository and UI Discovery:
-${contextJson}
+Repository:
+- Framework: ${context.repository.framework.name}
+- Architecture: ${context.repository.architecture.pattern}
+- Business Modules: ${context.repository.businessModules.map(m => m.name).join(", ")}
+
+Available Routes:
+${context.uiDiscovery.routes.map(r => `- ${r.path}: ${r.label}`).join("\n")}
 
 Existing Tests (${existingTests.length}):
 ${existingTests.map(t => `- ${t.title}: ${t.targetRoute}`).join("\n")}
@@ -271,11 +295,19 @@ Test Case:
             prompt += `Use these previously repaired selectors from memory.\n`;
         }
 
-        const aiContextEngine = new AIContextEngine();
-        const contextJson = aiContextEngine.buildCompactJSON(context);
+        prompt += `Repository Context:
+- Framework: ${context.repository?.framework?.name || 'Unknown'}
+- Routing: ${context.repository?.routing?.type || 'Unknown'}
+- Forms: ${context.repository?.forms?.library || "None"}
 
-        prompt += `Repository Context and UI State:
-${contextJson}
+Current UI State:
+${JSON.stringify({
+    currentUrl: context.uiDiscovery?.currentUrl || '',
+    buttons: context.uiDiscovery?.buttons?.slice(0, 15) || [],
+    forms: context.uiDiscovery?.forms?.slice(0, 3) || [],
+    loginDiscovery: context.uiDiscovery?.loginDiscovery || null,
+    dropdowns: context.uiDiscovery?.dropdowns?.slice(0, 5) || [],
+}, null, 2)}
 
 Broken Script:
 \`\`\`javascript
