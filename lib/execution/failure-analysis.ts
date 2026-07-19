@@ -361,9 +361,9 @@ export class FailureAnalysisService {
      * Analyze failure and generate report
      */
     async analyzeFailure(failureContext: FailureContext): Promise<FailureReport> {
-        const category = this.determineFailureCategory(failureContext);
-        const severity = this.determineSeverity(failureContext, category);
-        const retryRecommended = this.shouldRetry(failureContext, category);
+        let category = this.fallbackFailureCategory(failureContext);
+        let severity = this.determineSeverity(failureContext, category);
+        let retryRecommended = this.fallbackShouldRetry(failureContext, category);
 
         // Defaults used if the AI call fails — a flaky AI call should never
         // block failure reporting entirely.
@@ -395,6 +395,11 @@ export class FailureAnalysisService {
                     suggestedSelector: { type: Type.STRING, nullable: true },
                     executiveSummary: { type: Type.STRING },
                     isFlaky: { type: Type.BOOLEAN },
+                    category: { 
+                        type: Type.STRING,
+                        enum: ["authentication", "network", "api_failure", "playwright", "ui_change", "navigation", "infrastructure"]
+                    },
+                    retryRecommended: { type: Type.BOOLEAN },
                 },
                 required: [
                     "rootCause",
@@ -403,6 +408,8 @@ export class FailureAnalysisService {
                     "suggestedSelector",
                     "executiveSummary",
                     "isFlaky",
+                    "category",
+                    "retryRecommended",
                 ],
             };
 
@@ -413,6 +420,8 @@ export class FailureAnalysisService {
                 suggestedSelector: string | null;
                 executiveSummary: string;
                 isFlaky: boolean;
+                category: FailureCategory;
+                retryRecommended: boolean;
             }>(prompt, schema);
 
             rootCause = data.rootCause;
@@ -420,9 +429,17 @@ export class FailureAnalysisService {
             suggestedFix = data.suggestedFix;
             suggestedSelector = data.suggestedSelector;
             executiveSummary = data.executiveSummary;
+            
+            // Use AI-provided category and retry recommendation
+            category = data.category;
+            retryRecommended = data.retryRecommended;
+            
+            // Recalculate severity based on AI-provided category
+            severity = this.determineSeverity(failureContext, category);
         } catch (aiError) {
-            // Fall back to the placeholder strings above rather than throwing —
-            // a flaky AI call should never block failure reporting entirely.
+            // Fall back to rule-based logic when AI fails
+            category = this.fallbackFailureCategory(failureContext);
+            retryRecommended = this.fallbackShouldRetry(failureContext, category);
         }
 
         return {
@@ -704,8 +721,15 @@ export class FailureAnalysisService {
     // Private Methods - Analysis Helpers
     // ============================================================================
     
-    private determineFailureCategory(failureContext: FailureContext): FailureCategory {
-        const { failedStep, consoleLogs, networkLogs } = failureContext;
+    private fallbackFailureCategory(failureContext: FailureContext): FailureCategory {
+        const { failedStep, consoleLogs, networkLogs, browserState } = failureContext;
+        
+        // Check for navigation failures (page did not reach expected URL/route after an action)
+        if (failedStep.error.includes("redirect") || 
+            failedStep.error.includes("URL") ||
+            (browserState.currentUrl !== browserState.expectedUrl && browserState.expectedUrl)) {
+            return "navigation";
+        }
         
         // Check for authentication failures
         if (failedStep.selector.includes("login") || failedStep.selector.includes("auth")) {
@@ -745,7 +769,7 @@ export class FailureAnalysisService {
         return "medium";
     }
     
-    private shouldRetry(failureContext: FailureContext, category: FailureCategory): boolean {
+    private fallbackShouldRetry(failureContext: FailureContext, category: FailureCategory): boolean {
         // Do not retry on authentication, infrastructure, or API failures
         const nonRetryableCategories: FailureCategory[] = [
             "authentication",
